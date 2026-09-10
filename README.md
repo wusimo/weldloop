@@ -78,7 +78,7 @@
 | Phase 3 | `estimation/`（V/I 特征 → EKF 融合 + 学习残差），RMSE 对比表 | ✅ 完成，136 tests |
 | Phase 4 | `control/`（baseline vs adaptive vs **RGB 视觉**三方对比），指标对比表 | ✅ 完成，164 tests |
 | Phase 5 | `viz/` + `scripts/run_demo.py`，出图与 metrics.json | ✅ 完成 |
-| Phase 6 | 动画渲染 `out/weldloop.mp4`：俯视热场+烟羽 / 截面熔深 / 相机视角 | ✅ 完成 |
+| Phase 6 | 动画渲染：俯视对比 `out/weldloop.mp4` + **第三人称机器人视角** `out/weldloop_robot.mp4` | ✅ 完成 |
 
 > **关于"用 VLA 直接控制焊枪"**：本演示**不这样做**，理由是时间尺度与可观测性。
 > 电源内环 ~1 ms、运动层 20 ms、任务规划 秒–分钟；熔深对间隙变化的响应时间常数
@@ -86,7 +86,8 @@
 > Phase 2 中实测有 74 % 的帧不可用。把视觉放进实时回路，等于在视觉最不可靠的
 > 工况下宣称视觉闭环——这与本方案的立论正好相反。
 > AI 出现在两个诚实的位置：`estimation/residual.py`（估计器内的小残差网络）与
-> `planning/task_planner.py`（秒级、离线的任务规划钩子）。
+> `planning/task_planner.py`（秒级、离线的任务规划钩子，`TODO(llm-planner)` 标出了接入点：
+> 把作业描述/WPS/装配扫描变成分段与初始工艺窗口，输出只是**起点**，下游本来就会偏离它）。
 > Phase 4 会额外做一路 **RGB 视觉控制器** 作为对照组，用指标把"为什么不用视觉"
 > 从断言变成实测结果。
 
@@ -100,7 +101,8 @@ python scripts/plot_sensors.py           # Phase 2 传感器图 -> out/
 python scripts/plot_estimation.py        # Phase 3 估计图 + RMSE 表 -> out/
 python scripts/plot_control.py           # Phase 4 三方控制对比 -> out/
 python scripts/run_demo.py --seed 0 --gap-profile step   # 主演示（约 28 s）
-python scripts/render_animation.py       # 动画 -> out/weldloop.mp4（约 2.5 min）
+python scripts/render_animation.py       # 俯视对比动画 -> out/weldloop.mp4（约 2.5 min）
+python scripts/render_robot.py           # 第三人称机器人动画 -> out/weldloop_robot.mp4
 python scripts/make_dataset.py --n 6     # 生成数据集 -> data/
 python scripts/train_residual.py         # 可选：训练残差网络（无 torch 时自动跳过）
 ```
@@ -414,6 +416,8 @@ python scripts/run_demo.py --seed 0 --gap-profile step
 
 ## 九、动画渲染（Phase 6）
 
+### 9.1 俯视对比 `scripts/render_animation.py`
+
 ```bash
 python scripts/render_animation.py --seed 0 --gap-profile step
 ```
@@ -432,6 +436,39 @@ python scripts/render_animation.py --seed 0 --gap-profile step
 > **必须说清楚**：这是**同一套降阶物理的可视化**，不是 CFD。温度场是解析解、
 > 熔池是降阶模型的半椭圆、烟羽是程序化烟团。图上写了这句话，因为一张"看起来像 CFD
 > 但不是"的图在提案里是负资产。
+
+
+### 9.2 第三人称机器人视角 `scripts/render_robot.py`
+
+```bash
+python scripts/render_robot.py --seed 0 --gap-profile step
+```
+
+产出 `out/weldloop_robot.mp4`：一台机械臂端着焊枪沿焊缝走，母材按解析温度场发亮，
+焊道在枪后凝固变暗，烟尘从电弧升起；右侧同步给出 RGB / IR 相机画面与熔池横截面，
+底部是两种控制方式的真实熔深对比，并在"定参数在此处已烧穿"的位置弹出提示。
+
+**哪些是真的、哪些是布景（必须分清）**
+
+| 内容 | 来源 |
+|---|---|
+| 焊枪位置、行走速度、摆动、电流电压、熔宽熔深、烟尘密度、缺陷标志 | **仿真日志**，与其余所有图表同源 |
+| 母材表面温度场 | **Rosenthal 解析解**，用当前瞬时功率与行走速度算出 |
+| 关节角 | 对上述 TCP 轨迹做**逆运动学**，并校核关节限位 |
+| 连杆长度、焊枪外形、烟团与火花 | **布景**。不参与任何物理计算——把机械臂整个删掉，焊缝一模一样 |
+
+`weldloop/viz/robot.py` 是一台**通用小型弧焊臂**（0.64 m 臂展，肘型 + 球型腕）的运动学，
+连杆参数可配置、不取自任何厂商样本。它不只是画着好看：
+
+* 正/逆运动学互为逆映射，测试断言 TCP 位姿往返误差 < 1e-11；
+* 逆解在工作空间外**抛异常**而不是返回一个看似合理的错值；
+* `solve_path()` 对整条焊缝求解并报告"是否可达、最差关节余量、腕部是否接近奇异"。
+  这正是运动学模型平常的用途——**建线之前先确认这条轨迹机器人走得了**。
+
+一个实际发现：最初为了取景把机器人放得离工件很近，结果**肘关节只剩 6° 余量**；
+按"最大化最差关节余量"重新选底座位置后变成 **39°**。这条搜索就在模块的 docstring 里。
+另一个：`atan2` 在 ±π 处回绕，会让腕部滚转在焊缝中段跳 2π、渲染出来机械臂会"抽一下"；
+`solve_path()` 现在做 `np.unwrap`，并有一条测试专门盯住它。
 
 ---
 
@@ -454,6 +491,7 @@ README 中所有指标数字都由本仓库代码实际运行产生。
 |---|---|---|
 | `interfaces.PowerSourceBase` | `sim.cell.SimPowerSource` | 逆变电源现场总线 / SDK |
 | `interfaces.RobotBase` | `sim.cell.SimRobot` | 机器人 EGM / RSI 运动流 |
+| `viz.robot.ArmGeometry` | 通用小型弧焊臂 | 换成实机连杆参数与关节限位，即可用同一套 `solve_path()` 做建线可达性校核 |
 | `interfaces.SensorBase` | `sim.sensors.*` | 每个物理传感器一个 |
 | `sim.seam.make_seam` | 合成间隙曲线 | 激光轮廓仪实测 / 装配扫描 |
 | `physics.melt_pool` 系数 | 集总默认值 | 用一期数据做参数辨识 |
