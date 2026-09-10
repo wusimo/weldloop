@@ -49,6 +49,33 @@ class Observation:
                 self.values[name] = value
                 self.stamps[name] = smp.t
 
+    #: machine-side feedback: encoder position, actual speeds, drive tacho.
+    #: A real cell has all of these; they are not "sensors" in the suite, but
+    #: the controller obviously reads them back, and without them it cannot
+    #: know where along the seam it is.
+    MACHINE_CHANNELS = (
+        "rb_s", "rb_v_travel", "rb_weave_offset", "rb_ctwd", "ps_v_wire", "ps_V_set"
+    )
+
+    def update_machine(self, truth) -> None:
+        """Write the machine-side feedback channels.
+
+        Takes a ``GroundTruth`` because that is what the simulator has, but
+        reads only fields a real robot and a real inverter report.  Nothing
+        here is unobservable, and no ``truth_`` field is touched.
+        """
+        v = self.values
+        st = self.stamps
+        for name, value in (
+            ("rb_s", truth.s),
+            ("rb_v_travel", truth.v_travel),
+            ("rb_weave_offset", truth.weave_offset),
+            ("rb_ctwd", truth.command.ctwd),
+            ("ps_v_wire", truth.v_wire),
+        ):
+            v[name] = float(value)
+            st[name] = truth.t
+
     def get(self, name: str, default: float = float("nan")) -> float:
         return self.values.get(name, default)
 
@@ -60,7 +87,20 @@ class Observation:
 
 
 class Controller(Protocol):
-    """What Phase 4 plugs in here."""
+    """What Phase 4 plugs in here.
+
+    Only ``update`` is required.  Two optional hooks give a controller access
+    to the faster timescales, which is what makes the three-layer split real
+    rather than decorative:
+
+    ``on_samples(t, samples)``
+        Called every simulation tick with the raw sensor block — the software
+        equivalent of a DAQ callback.  The adaptive controller uses it to feed
+        its 5 kHz V/I ring buffer.
+    ``fast_update(t, obs)``
+        Called every ``power_source.inner_dt`` (2 ms) for the electrical inner
+        loop, between the 20 ms motion-layer decisions.
+    """
 
     def reset(self, cfg: WeldConfig) -> None: ...
 
@@ -120,9 +160,14 @@ def simulate(
         controller.reset(cfg)
 
     control_period = cfg.control.dt
+    inner_period = cfg.power_source.inner_dt
     t_next_control = 0.0
+    t_next_inner = 0.0
     n = 0
     raw: list[GroundTruth] = []
+
+    on_samples = getattr(controller, "on_samples", None)
+    fast_update = getattr(controller, "fast_update", None)
 
     while not cell.done:
         gt = cell.step()
@@ -131,6 +176,16 @@ def simulate(
         logger.log_truth(gt)
         logger.log_V_set(cell.power_source.V_set, gt.t)
         obs.update(samples, gt.t)
+        obs.update_machine(gt)
+
+        if on_samples is not None:
+            on_samples(gt.t, samples)
+
+        if fast_update is not None and gt.t >= t_next_inner:
+            t_next_inner += inner_period
+            cmd = fast_update(gt.t, obs)
+            if cmd is not None:
+                cell.command(cmd)
 
         if controller is not None and gt.t >= t_next_control:
             t_next_control += control_period

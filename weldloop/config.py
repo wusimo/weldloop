@@ -203,6 +203,13 @@ class DefectConfig(BaseModel):
         0.30,
         description="deposited filler raises the bridging limit: w_crit *= (1 + k*min(f,1)) [-]",
     )
+    min_hole_length: float = Field(
+        0.20e-3,
+        description=(
+            "shortest run of the burn-through condition that counts as a hole [m]; "
+            "shorter runs are marginal excursions of the bridging criterion"
+        ),
+    )
     p_min: float = Field(2.5e-3, description="minimum acceptable penetration [m]")
     f_min: float = Field(0.85, description="minimum acceptable gap-fill ratio [-]")
 
@@ -294,8 +301,21 @@ class PowerSourceConfig(BaseModel):
     tau_wire: float = Field(60.0e-3, description="wire drive time constant [s]")
     L_arc_min: float = Field(1.0e-3, description="shortest physically sensible arc [m]")
     stickout_min: float = Field(3.0e-3, description="shortest electrode extension [m]")
-    kp_arc: float = Field(6.0, description="inner-loop arc-length PI proportional gain [A/mm]")
-    ki_arc: float = Field(40.0, description="inner-loop arc-length PI integral gain [A/(mm s)]")
+    inner_dt: float = Field(
+        2.0e-3, description="inner-loop update period [s]; ms timescale by design"
+    )
+    kp_arc: float = Field(
+        0.45, description="inner-loop arc-length PI proportional gain [mm of command / mm of error]"
+    )
+    ki_arc: float = Field(
+        1.20, description="inner-loop arc-length PI integral gain [1/s]"
+    )
+    kp_wire_I: float = Field(
+        4.0e-5, description="current -> wire feed proportional gain [m/(s A)]"
+    )
+    ki_wire_I: float = Field(
+        1.5e-4, description="current -> wire feed integral gain [m/(s A s)]"
+    )
 
 
 class RobotConfig(BaseModel):
@@ -436,9 +456,66 @@ class ControlConfig(BaseModel):
     p_lo: float = Field(3.0e-3, description="lower edge of the acceptance band [m]")
     p_hi: float = Field(5.0e-3, description="upper edge of the acceptance band [m]")
 
+    # --- handle allocation -------------------------------------------------
+    # Current is the primary penetration authority (strong, direct).  Travel
+    # speed is the productivity handle, bounded from above by the filler.
+    # Weave bridges the gap and relieves over-penetration.
+    kp_I: float = Field(1.10, description="penetration error -> current, proportional [-]")
+    ki_I: float = Field(0.55, description="penetration error -> current, integral [1/s]")
+    w_safety: float = Field(
+        2.00,
+        description="weight of the band-violation terms relative to target tracking [-]",
+    )
+    tau_integ: float = Field(
+        1.50, description="integral bleed time constant when inside the band [s]"
+    )
     kp_v: float = Field(0.9, description="penetration -> travel-speed proportional gain [-]")
     ki_v: float = Field(0.6, description="penetration -> travel-speed integral gain [1/s]")
+    fill_target: float = Field(
+        1.00, description="gap-fill ratio the travel-speed limit aims for [-]"
+    )
+    I_headroom: float = Field(
+        0.15,
+        description=(
+            "fraction of the current range kept in reserve [-]; the speed loop "
+            "stops pushing when the current loop is this close to saturating, "
+            "because past that point speed can no longer be paid for"
+        ),
+    )
+    k_prod: float = Field(
+        0.35,
+        description=(
+            "productivity term [-]: when the whole +/-k_sigma band sits inside the "
+            "acceptance band, speed up by this much per unit of remaining slack.  "
+            "This is also what makes uncertainty costly -- a wide band leaves no "
+            "slack, so an unsure controller simply does not speed up"
+        ),
+    )
     kp_wire: float = Field(0.7, description="fill error -> wire feed proportional gain [-]")
+    k_weave_pen: float = Field(
+        1.10, description="extra weave per unit of normalised over-penetration [-]"
+    )
+    I_min_cmd: float = Field(170.0, description="lowest current the motion layer may ask for [A]")
+    I_max_cmd: float = Field(285.0, description="highest current the motion layer may ask for [A]")
+    gap_lead_time: float = Field(
+        0.50,
+        description=(
+            "how far ahead in time the controller acts on the previewed gap [s]; "
+            "covers the travel-speed servo and the pool's own lag"
+        ),
+    )
+    v_slew: float = Field(
+        18.0e-3, description="max change of the travel-speed command [m/s per second]"
+    )
+    I_slew: float = Field(
+        120.0,
+        description=(
+            "max rate of change of the current command [A/s].  Without this the "
+            "PI chases the per-tick noise of the estimate and the machine hunts "
+            "over tens of amps at 50 Hz -- correct on paper, unacceptable on a "
+            "real inverter and audible in the arc"
+        ),
+    )
     k_sigma: float = Field(
         1.6,
         description="conservatism: extra margin per unit penetration std [-]",
