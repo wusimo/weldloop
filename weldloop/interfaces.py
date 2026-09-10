@@ -43,10 +43,19 @@ class SensorSample:
 
 
 class SensorBase(ABC):
-    """A sensor sampling at its own fixed rate off the master clock."""
+    """A sensor sampling at its own fixed rate, independent of the sim step.
 
-    #: column names this sensor contributes to the log
+    ``poll`` is modelled on a buffered DAQ: you ask it for everything that has
+    arrived since you last asked, and you get a block.  A sensor slower than
+    the simulation step returns an empty list most of the time; a sensor faster
+    than the simulation step (the 20 kHz microphone against a 5 kHz sim)
+    returns several samples per call.  Nothing upstream has to know which.
+    """
+
+    #: log column names this sensor contributes
     columns: tuple[str, ...] = ()
+    #: short name used as the log prefix and in the schema table
+    name: str = "sensor"
 
     def __init__(self, rate_hz: float, rng: np.random.Generator) -> None:
         self.rate_hz = float(rate_hz)
@@ -54,16 +63,18 @@ class SensorBase(ABC):
         self._rng = rng
         self._t_next = 0.0
 
-    def due(self, t: float) -> bool:
-        """True when the master clock has reached this sensor's next sample."""
-        return t + 1e-12 >= self._t_next
+    def poll(self, t: float, truth: Any) -> list[SensorSample]:
+        """Every sample whose timestamp has been reached by master time ``t``.
 
-    def maybe_sample(self, t: float, truth: Any) -> SensorSample | None:
-        """Return a sample if the sensor is due at time ``t``, else ``None``."""
-        if not self.due(t):
-            return None
-        self._t_next += self._period
-        return self.sample(t, truth)
+        Timestamps are the sensor's own, not the caller's: a 30 Hz camera polled
+        at 5 kHz stamps its frames on the 30 Hz grid.  That is what makes the
+        log time-aligned rather than merely time-stamped.
+        """
+        out: list[SensorSample] = []
+        while self._t_next <= t + 1e-12:
+            out.append(self.sample(self._t_next, truth))
+            self._t_next += self._period
+        return out
 
     @abstractmethod
     def sample(self, t: float, truth: Any) -> SensorSample:

@@ -74,15 +74,19 @@
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | Phase 1 | `physics/` + `sim/`（热源、电弧、降阶熔池、焊缝、WeldCell） | ✅ 完成，70 tests |
-| Phase 2 | `sim/sensors.py` + `sim/logger.py`，统一主时钟与宽表 schema | ⏳ |
+| Phase 2 | `sim/sensors.py` + `sim/logger.py`，统一主时钟与宽表 schema | ✅ 完成，107 tests |
 | Phase 3 | `estimation/`（V/I 特征 → EKF 融合），RMSE 对比表 | ⏳ |
 | Phase 4 | `control/`（baseline vs adaptive），指标对比表 | ⏳ |
 | Phase 5 | `viz/` + `scripts/run_demo.py`，出图与 metrics.json | ⏳ |
 
-运行测试：
+运行：
 
 ```bash
-cd weldloop && python -m pytest -q
+cd weldloop
+python -m pytest -q                      # 全部测试
+python scripts/plot_physics.py           # Phase 1 自检图 -> out/
+python scripts/plot_sensors.py           # Phase 2 传感器图 -> out/
+python scripts/make_dataset.py --n 6     # 生成数据集 -> data/
 ```
 
 ---
@@ -122,9 +126,88 @@ cd weldloop && python -m pytest -q
 
 `WeldCell.step()` 在给定 seed 下**逐位确定**。
 
+
 ---
 
-## 五、参数来源声明
+## 五、传感器套件与采集 schema（Phase 2）
+
+### 5.1 六个传感器，各自的失效模式
+
+| 传感器 | 速率 | 它会在什么地方出错 |
+|---|---|---|
+| `PowerSourceSensor` | 5 kHz | 高斯噪声 + ADC 量化。**从不失效**——这正是本方案的立论点：烟尘、弧光、飞溅都打不掉它 |
+| `SeamProfiler` | 30 Hz | 飞溅导致丢帧（丢帧报 NaN，绝不报一个"看起来合理的错数"）；**前视**安装，给的是预览而不是反馈 |
+| `IRCamera` | 30 Hz | 烟尘衰减辐射。相机在额定烟尘下标定，所以烟尘带来的是**方差**而不是常值偏差；浓烟团时整帧拒绝 |
+| `ArcMic` | 20 kHz | 宽带噪声 + 熔池振荡音调 + 再引弧冲击；比仿真步长还快，一步产生 4 个样本 |
+| `TorchForce` | 1 kHz | 被电弧力主导，看不到熔池；只用于与短路统计互证 |
+| `RGBCamera` | 30 Hz | **专门放进来演示它会瞎**：烟尘衰减系数远大于 IR，叠加弧光过曝 |
+
+实测（`seed=0`，200 mm 阶跃间隙焊缝，由 `scripts/plot_sensors.py` 产生）：
+
+* IR 熔宽 RMSE **0.83 mm**，RGB 熔宽 RMSE **7.97 mm**（熔池本身才 ~11 mm 宽）；
+* RGB 有 **74 %** 的帧图像可用度低于阈值；即使"可用"的帧，其读数噪声也已达到熔宽量级；
+* 激光轮廓仪领先电弧 **2.7 s** 看到间隙变化（12 mm 前视 / 4.5 mm·s⁻¹）；
+* **规则：RGB 永远不作为过程传感器使用。** 它只出现在 Phase 3 RMSE 表的"反面例子"一行。
+
+### 5.2 主时钟与宽表规则
+
+1. **一个主时钟。** 每一行是同一个时钟的一拍（默认 5 kHz，即电源采样率）。传感器按**自己的时间戳**入表，而不是按软件何时读到。
+2. **NaN 表示"该时刻没有采样"。** 30 Hz 相机每 167 行填一行。写文件时**不做前向填充**——插值是分析阶段的选择，把它烘进日志会毁掉"数据何时真正到达"这一证据。
+3. **比主时钟更快的通道做块内聚合，而不是丢弃。** 20 kHz 麦克风每个主拍贡献一个 RMS 和一个咔哒计数；schema 的 `聚合` 列写明每个值的含义。真实产线上原始流单独存盘，块特征进主表——这里的 schema 就是照这个写的。
+4. **真值被隔离。** 真实产线拿不到的列一律以 `truth_` 前缀标注、`real_hw=False`。估计器与控制器只能看到 `LogTable.real_hw_view()`；打分代码才读 `truth_` 列。有一条测试专门保证真值不会泄漏进控制器可见的 `Observation`。
+
+`scripts/make_dataset.py` 按此 schema 生成数据集（Parquet，无 pyarrow 时退化为 gzip CSV），并附 `manifest.json` 与 `SCHEMA.md`。
+
+### 5.3 采集 schema（= 一期真实采集建议表）
+
+| column | unit | source | rate [Hz] | 主时钟聚合 | 真实产线可得 | 说明 |
+|---|---|---|---|---|---|---|
+| `t` | s | master clock | 5000 | last | ✅ | master clock time; one row per tick |
+| `ps_V` | V | power source | 5000 | last | ✅ | arc voltage, raw (short-circuit collapses included) |
+| `ps_I` | A | power source | 5000 | last | ✅ | welding current, raw (short-circuit surges included) |
+| `ps_short` | - | power source | 5000 | max | ✅ | 1 while a short circuit is active |
+| `ps_v_wire` | m/s | power source | 5000 | last | ✅ | wire feed speed from the drive tacho |
+| `ps_V_set` | V | power source | 5000 | last | ✅ | machine set voltage (what the CV loop is holding) |
+| `prof_gap` | m | laser profiler | 30 | last | ✅ | root gap measured AHEAD of the arc; NaN on spatter dropout |
+| `prof_offset` | m | laser profiler | 30 | last | ✅ | lateral seam offset ahead of the arc |
+| `prof_lead_s` | m | laser profiler | 30 | last | ✅ | seam station the profiler was looking at |
+| `prof_valid` | - | laser profiler | 30 | last | ✅ | 0 on dropout; a dropout is never reported as a plausible number |
+| `ir_T_peak` | K | IR camera | 30 | last | ✅ | peak apparent pool temperature; smoke-attenuated |
+| `ir_pool_width` | m | IR camera | 30 | last | ✅ | pool width from the melting isotherm |
+| `ir_valid` | - | IR camera | 30 | last | ✅ | 0 when the frame is rejected (dense plume) |
+| `mic_p` | Pa | arc microphone | 20000 | rms | ✅ | RMS over the master tick of the 20 kHz acoustic pressure |
+| `mic_click` | count | arc microphone | 20000 | sum | ✅ | short-circuit re-ignition clicks in this master tick |
+| `force_N` | N | torch force | 1000 | last | ✅ | torch reaction force; dominated by arc force |
+| `rgb_quality` | - | RGB camera | 30 | last | ✅ | image usability = smoke transmission x glare rejection |
+| `rgb_pool_width` | m | RGB camera | 30 | last | ✅ | pool width from the visible image; noise scales as 1/quality |
+| `rgb_valid` | - | RGB camera | 30 | last | ✅ | 0 when quality is below the usable threshold |
+| `cmd_I_set` | A | controller | 5000 | last | ✅ | commanded current setpoint |
+| `cmd_v_wire_set` | m/s | controller | 5000 | last | ✅ | commanded wire feed speed |
+| `cmd_arc_len_set` | m | controller | 5000 | last | ✅ | commanded arc length |
+| `cmd_v_travel` | m/s | controller | 5000 | last | ✅ | commanded travel speed |
+| `cmd_weave_amp` | m | controller | 5000 | last | ✅ | commanded weave half-amplitude |
+| `rb_s` | m | robot encoder | 5000 | last | ✅ | torch position along the seam |
+| `rb_v_travel` | m/s | robot encoder | 5000 | last | ✅ | actual travel speed |
+| `rb_weave_offset` | m | robot encoder | 5000 | last | ✅ | instantaneous lateral weave offset |
+| `rb_ctwd` | m | robot | 5000 | last | ✅ | commanded contact-tip-to-work distance |
+| `truth_gap` | m | simulator | 5000 | last | ❌ 仅仿真 | true root gap under the arc |
+| `truth_offset` | m | simulator | 5000 | last | ❌ 仅仿真 | true lateral misalignment |
+| `truth_T_pool` | K | simulator | 5000 | last | ❌ 仅仿真 | true mean pool temperature |
+| `truth_pool_w` | m | simulator | 5000 | last | ❌ 仅仿真 | true pool width |
+| `truth_penetration` | m | simulator | 5000 | last | ❌ 仅仿真 | true penetration depth — the quantity being estimated |
+| `truth_fill` | - | simulator | 5000 | last | ❌ 仅仿真 | true gap fill ratio |
+| `truth_stickout` | m | simulator | 5000 | last | ❌ 仅仿真 | true electrode extension |
+| `truth_arc_len` | m | simulator | 5000 | last | ❌ 仅仿真 | true mean arc length including pool depression |
+| `truth_f_osc` | Hz | simulator | 5000 | last | ❌ 仅仿真 | true pool oscillation frequency |
+| `truth_a_osc` | m | simulator | 5000 | last | ❌ 仅仿真 | true pool oscillation amplitude |
+| `truth_f_sc` | Hz | simulator | 5000 | last | ❌ 仅仿真 | true expected short-circuit rate |
+| `truth_smoke` | - | simulator | 5000 | last | ❌ 仅仿真 | true smoke density |
+| `truth_burn_through` | - | simulator | 5000 | max | ❌ 仅仿真 | 1 while the burn-through condition holds |
+| `truth_lack_of_fusion` | - | simulator | 5000 | max | ❌ 仅仿真 | 1 while any lack-of-fusion condition holds |
+
+---
+
+## 六、参数来源声明
 
 仓库中所有数值只有两类：
 
@@ -137,13 +220,13 @@ README 中所有指标数字都由本仓库代码实际运行产生。
 
 ---
 
-## 六、走向真实硬件时需要替换的适配器
+## 七、走向真实硬件时需要替换的适配器
 
 | 抽象基类 | 仿真实现 | 真实硬件适配器（待写） |
 |---|---|---|
 | `interfaces.PowerSourceBase` | `sim.cell.SimPowerSource` | 逆变电源现场总线 / SDK |
 | `interfaces.RobotBase` | `sim.cell.SimRobot` | 机器人 EGM / RSI 运动流 |
-| `interfaces.SensorBase` | `sim.sensors.*`（Phase 2） | 每个物理传感器一个 |
+| `interfaces.SensorBase` | `sim.sensors.*` | 每个物理传感器一个 |
 | `sim.seam.make_seam` | 合成间隙曲线 | 激光轮廓仪实测 / 装配扫描 |
 | `physics.melt_pool` 系数 | 集总默认值 | 用一期数据做参数辨识 |
 | `estimation.residual` | 在仿真数据上训练 | 在真实数据上重训 |

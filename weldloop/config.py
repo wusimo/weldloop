@@ -322,7 +322,7 @@ GapProfileKind = Literal["step", "ramp", "sine", "random", "constant"]
 class SeamConfig(BaseModel):
     """Seam length and root-gap profile g(s)."""
 
-    length: float = Field(0.30, description="seam length [m]")
+    length: float = Field(0.20, description="seam length [m]")
     kind: GapProfileKind = "step"
     gap_min: float = Field(0.0, description="minimum root gap [m]")
     gap_max: float = Field(4.0e-3, description="maximum root gap [m]")
@@ -342,9 +342,16 @@ class SeamConfig(BaseModel):
 class SensorConfig(BaseModel):
     """Rates and noise of the synthetic sensor suite."""
 
+    f_master: float = Field(
+        5000.0,
+        description="master clock of the log [Hz]; channels faster than this are binned",
+    )
+
     f_power: float = Field(5000.0, description="power-source V/I sample rate [Hz]")
     noise_V: float = Field(0.35, description="voltage noise std [V]")
     noise_I: float = Field(4.0, description="current noise std [A]")
+    lsb_V: float = Field(0.01, description="voltage ADC resolution [V]")
+    lsb_I: float = Field(0.25, description="current ADC resolution [A]")
 
     f_profiler: float = Field(30.0, description="laser seam profiler rate [Hz]")
     noise_gap: float = Field(0.12e-3, description="gap measurement noise std [m]")
@@ -358,7 +365,15 @@ class SensorConfig(BaseModel):
     noise_T: float = Field(25.0, description="IR peak-temperature noise std [K]")
     noise_w: float = Field(0.30e-3, description="IR isotherm pool-width noise std [m]")
     ir_smoke_tau: float = Field(
-        0.55, description="IR attenuation per unit smoke density [-] (low = sees through)"
+        0.35,
+        description=(
+            "IR radiance attenuation per unit smoke density [-]; applied to the "
+            "DEVIATION from the calibration smoke level, because a real camera is "
+            "calibrated on a nominal weld — so smoke costs you variance, not bias"
+        ),
+    )
+    ir_blind_smoke: float = Field(
+        1.70, description="smoke density above which the IR frame is rejected [-]"
     )
 
     f_mic: float = Field(20000.0, description="arc microphone rate [Hz]")
@@ -367,11 +382,38 @@ class SensorConfig(BaseModel):
     f_force: float = Field(1000.0, description="torch force sensor rate [Hz]")
     noise_force: float = Field(0.05, description="force noise std [N]")
 
+    f_mic_tone: float = Field(
+        0.35, description="microphone tone amplitude at the pool oscillation [Pa]"
+    )
+    mic_broadband_per_kW: float = Field(
+        0.045, description="broadband acoustic level per kW of arc power [Pa/kW]"
+    )
+    mic_click: float = Field(1.8, description="short-circuit re-ignition click amplitude [Pa]")
+
     f_rgb: float = Field(30.0, description="RGB camera rate [Hz]")
     rgb_smoke_tau: float = Field(
-        6.0, description="RGB attenuation per unit smoke density [-] (high = blinded)"
+        3.2, description="RGB attenuation per unit smoke density [-] (high = blinded)"
+    )
+    rgb_glare_I: float = Field(
+        260.0,
+        description="current at which arc glare alone halves RGB usability [A]",
+    )
+    rgb_quality_min: float = Field(
+        0.05, description="image quality below which the RGB frame is unusable [-]"
+    )
+    noise_rgb_w: float = Field(
+        0.60e-3,
+        description="RGB pool-width noise std at PERFECT visibility [m]; scaled by 1/quality",
     )
     smoke_base: float = Field(0.35, description="baseline smoke density [-]")
+    smoke_ref: float = Field(
+        0.88,
+        description=(
+            "smoke density the IR camera is CALIBRATED at [-]; set it to the "
+            "nominal operating value (smoke_base + smoke_per_kW * nominal kW) so "
+            "that fume costs the camera variance rather than a standing bias"
+        ),
+    )
     smoke_per_kW: float = Field(0.11, description="extra smoke density per kW of arc power [-]")
 
 
