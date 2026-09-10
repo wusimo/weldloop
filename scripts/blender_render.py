@@ -23,13 +23,12 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import sys
 from pathlib import Path
 
 import bpy
 import numpy as np
-from mathutils import Euler, Quaternion, Vector
+from mathutils import Quaternion, Vector
 
 
 # --------------------------------------------------------------------------
@@ -269,7 +268,6 @@ def build(args) -> dict:
     sc.collection.objects.link(cam)
     sc.camera = cam
 
-    state_view = args["view"]
     return {
         "meta": meta, "fr": fr, "n_frames": n_frames, "objs": objs,
         "torch_parts": torch_parts, "arc_ball": arc_ball, "arc_light": arc_light,

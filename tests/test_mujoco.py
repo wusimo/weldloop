@@ -9,8 +9,6 @@ on an articulated arm rather than on a point that moves at a commanded speed.
 
 from __future__ import annotations
 
-import math
-
 import numpy as np
 import pytest
 

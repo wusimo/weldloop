@@ -94,7 +94,7 @@ def stage_blender(args) -> None:
         print(f"  rendering {view} -> {out}")
         t0 = time.time()
         subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL)
-        print(f"  {view} done in {time.time() - t0 / 1.0:.1f} s")
+        print(f"  {view} done in {time.time() - t0:.1f} s")
 
 
 def stage_composite(args) -> None:
@@ -117,11 +117,15 @@ def stage_composite(args) -> None:
     use_style()
     first = mpimg.imread(shots[0][1][0])
     h, w = first.shape[:2]
-    fig = plt.figure(figsize=(w / 100.0, w / 100.0 * 0.72))
-    gs = fig.add_gridspec(2, 1, height_ratios=[1.0, 0.30], hspace=0.16,
-                          left=0.045, right=0.985, top=0.94, bottom=0.10)
-    ax_img = fig.add_subplot(gs[0])
-    ax_strip = fig.add_subplot(gs[1])
+    # Size the figure so the render fills its axes exactly: imshow keeps the
+    # image aspect, so a mismatched axes just adds black bars.
+    fig_w = 12.8
+    img_frac_w, img_frac_h = 0.945, 0.700
+    img_axes_w = fig_w * img_frac_w
+    fig_h = (img_axes_w * h / w) / img_frac_h
+    fig = plt.figure(figsize=(fig_w, fig_h))
+    ax_img = fig.add_axes((0.0275, 0.255, img_frac_w, img_frac_h))
+    ax_strip = fig.add_axes((0.055, 0.075, 0.905, 0.150))
     ax_img.set_xticks([]); ax_img.set_yticks([]); ax_img.grid(False)
     for sp in ax_img.spines.values():
         sp.set_color(C.grid)
