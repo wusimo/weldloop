@@ -318,11 +318,20 @@ class WeldCell:
         cfg: WeldConfig | None = None,
         seam: Seam | None = None,
         seed: int | None = None,
+        robot: RobotBase | None = None,
     ) -> None:
+        """``robot`` replaces the built-in travel-speed servo.
+
+        This is the seam the abstract base class exists for: passing a
+        ``MujocoRobot`` here puts a real articulated arm in the loop and the
+        weld physics then sees the TCP the arm actually achieved, tracking
+        error and all.  Nothing else in the cell changes.
+        """
         self.cfg = cfg or default_config()
         if seed is not None:
             self.cfg.sim.seed = int(seed)
         self.seam = seam if seam is not None else make_seam(self.cfg.seam, self.cfg.sim.seed)
+        self._robot_override = robot
         self.reset()
 
     # -- lifecycle -------------------------------------------------------
@@ -335,7 +344,7 @@ class WeldCell:
         self.model = MeltPoolModel(cfg)
         self.arc_model = ArcModel(cfg.arc, cfg.consumable, cfg.material, self.rng.arc)
         self.power_source = SimPowerSource(cfg, self.rng.arc)
-        self.robot = SimRobot(cfg)
+        self.robot = self._robot_override if self._robot_override is not None else SimRobot(cfg)
 
         dcfg = cfg.disturbance
         self._ou_rho = OrnsteinUhlenbeck(dcfg.rho_e_tau, dcfg.rho_e_std, self.rng.disturbance)

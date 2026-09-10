@@ -19,6 +19,8 @@ dependencies = [
 dev = ["pytest>=7.4"]
 learn = ["torch>=2.0"]
 ui = ["streamlit>=1.30", "pyarrow>=14"]
+# a real articulated arm in the loop, and the photoreal render pipeline
+robot = ["mujoco>=3.2", "robot_descriptions>=1.12"]
 
 [tool.setuptools.packages.find]
 include = ["weldloop*"]

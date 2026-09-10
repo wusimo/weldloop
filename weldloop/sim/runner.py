@@ -126,6 +126,7 @@ def simulate(
     controller: Controller | None = None,
     include_truth: bool = True,
     raw_history: bool = False,
+    robot=None,
 ) -> RunResult:
     """Run one weld end to end and return the master-clock log.
 
@@ -139,6 +140,10 @@ def simulate(
     include_truth:
         Keep the ``truth_`` columns.  Set ``False`` to produce a table shaped
         exactly like a real capture.
+    robot:
+        Optional ``RobotBase`` replacing the built-in travel-speed servo — pass
+        a ``sim.mujoco_cell.MujocoRobot`` to put a real articulated arm in the
+        loop.  Note it carries state, so a fresh one is needed per run.
     raw_history:
         Also return the per-step ``GroundTruth`` objects in
         ``RunResult.table.raw``; only used by the plotting scripts, because it
@@ -149,7 +154,7 @@ def simulate(
         cfg.sim.seed = int(seed)
     seam = seam if seam is not None else make_seam(cfg.seam, cfg.sim.seed)
 
-    cell = WeldCell(cfg, seam=seam, seed=cfg.sim.seed)
+    cell = WeldCell(cfg, seam=seam, seed=cfg.sim.seed, robot=robot)
     # Sensor noise gets its own root stream, keyed off the same seed, so that
     # changing the sensor suite cannot perturb the plant trajectory.
     suite = SensorSuite(cfg, seam, np.random.default_rng([cfg.sim.seed, _SENSOR_STREAM]))

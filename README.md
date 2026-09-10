@@ -78,7 +78,8 @@
 | Phase 3 | `estimation/`（V/I 特征 → EKF 融合 + 学习残差），RMSE 对比表 | ✅ 完成，136 tests |
 | Phase 4 | `control/`（baseline vs adaptive vs **RGB 视觉**三方对比），指标对比表 | ✅ 完成，164 tests |
 | Phase 5 | `viz/` + `scripts/run_demo.py`，出图与 metrics.json | ✅ 完成 |
-| Phase 6 | 动画渲染：俯视对比 `out/weldloop.mp4` + **第三人称机器人视角** `out/weldloop_robot.mp4` | ✅ 完成 |
+| Phase 6 | 动画渲染：俯视对比 `out/weldloop.mp4` + 第三人称 `out/weldloop_robot.mp4` | ✅ 完成 |
+| Phase 7 | **真实机器人在环**：MuJoCo + UR10e，Blender Cycles 照片级渲染 | ✅ 完成 |
 
 > **关于"用 VLA 直接控制焊枪"**：本演示**不这样做**，理由是时间尺度与可观测性。
 > 电源内环 ~1 ms、运动层 20 ms、任务规划 秒–分钟；熔深对间隙变化的响应时间常数
@@ -103,6 +104,10 @@ python scripts/plot_control.py           # Phase 4 三方控制对比 -> out/
 python scripts/run_demo.py --seed 0 --gap-profile step   # 主演示（约 28 s）
 python scripts/render_animation.py       # 俯视对比动画 -> out/weldloop.mp4（约 2.5 min）
 python scripts/render_robot.py           # 第三人称机器人动画 -> out/weldloop_robot.mp4
+
+# Phase 7：真实机器人在环 + 照片级渲染（需要 pip install "weldloop[robot]" 与 Blender）
+python scripts/render_mujoco.py          # MuJoCo 单元视频 -> out/weldloop_mujoco.mp4
+python scripts/render_photoreal.py --stage all   # 全流程 -> out/weldloop_photoreal.mp4
 python scripts/make_dataset.py --n 6     # 生成数据集 -> data/
 python scripts/train_residual.py         # 可选：训练残差网络（无 torch 时自动跳过）
 ```
@@ -470,9 +475,81 @@ python scripts/render_robot.py --seed 0 --gap-profile step
 另一个：`atan2` 在 ±π 处回绕，会让腕部滚转在焊缝中段跳 2π、渲染出来机械臂会"抽一下"；
 `solve_path()` 现在做 `np.unwrap`，并有一条测试专门盯住它。
 
+
 ---
 
-## 十、参数来源声明
+## 十、真实机器人在环与照片级渲染（Phase 7）
+
+前六个阶段把机械臂当作一个"行走速度伺服"，因为焊接物理只需要焊枪的位置与速度。
+这站得住脚，但留下两个客户一定会问的问题：**真机走得了这套运动吗？跟踪误差会把焊缝弄成什么样？**
+
+### 10.1 把 UR10e 放进回路
+
+`weldloop/sim/mujoco_cell.py` 用 MuJoCo 搭了一个真实焊接单元：
+**MuJoCo Menagerie 原版 UR10e**（真实连杆惯量、关节限位、随模型发布的 PD 位置执行器）、
+焊枪、工作台、夹具与工件。它实现的是**同一个 `RobotBase` 接口**——这正是那个抽象基类存在的意义：
+
+```python
+robot = MujocoRobot(cfg, seam)              # 一台真的 6 轴机械臂
+simulate(cfg, controller=..., robot=robot)  # 其余一行都不用改
+```
+
+* 指令路径参数仍由控制器的行走速度积分而来（与 `SimRobot` 同一套律，比较才公平）；
+* 阻尼最小二乘微分逆解把 TCP 位姿变成关节目标；
+* MuJoCo 用自己的执行器动力学积分整条手臂；
+* **随后把实际达到的 TCP 反投影回焊缝，交给焊接物理**。
+
+于是跟踪误差、伺服滞后与摆动衰减会真的传到熔池里。
+
+### 10.2 结论在真机上是否成立
+
+| | 行走速度伺服 | **UR10e 在环** |
+|---|---|---|
+| 定参数：烧穿长度 | 35.6 mm | **36.3 mm** |
+| 自适应：烧穿长度 | 0.0 mm | **0.0 mm** |
+| 自适应：熔深 std | 0.19 mm | **0.18 mm** |
+| 自适应：在带内 | 100 % | **100 %** |
+| 循环时间 | 47.3 s | 48.1 s（+1.7 %） |
+| TCP 跟踪误差 | — | **0.006–0.056 mm** |
+
+**结论原样成立。** 这不是"运气好"，而是因为 2 Hz、±2 mm 的摆动对一台工业臂来说本来就不难；
+把它算出来，比在提案里写一句"机器人应该跟得上"有用得多。
+
+### 10.3 一路上真发现的两个问题
+
+1. **Menagerie 的伺服增益与摆动共振。** 随模型发布的 `kp=5000, kd=500` 的慢极点在
+   `kp/kd = 10 rad/s ≈ 1.6 Hz`，正好压在 2 Hz 摆动上，实测摆幅被放大到指令的 **1.9 倍**。
+   这是通用抓取整定的性质，不是硬件的性质；按焊接工况重新整定为 `kp=14000, kd=220`
+   后，TCP 平均误差 **0.134 mm**、速度跟踪精确。这两个数是本仓库里唯一与已发布模型不同的地方，
+   代码里写明了。
+2. **逆解闭在测量上会留下静差。** 把 `q_cmd = qpos + gain·dq` 这样闭环，平衡点只要求
+   `gain·dq` 等于伺服下垂量，于是稳态 TCP 误差恒为 **11 mm**。改成在**指令**上积分
+   （resolved-rate + 前馈）后降到 0.13 mm。另外给机械臂开了重力补偿——真实控制器都这么做，
+   否则那 1 厘米下垂会被误读成一个控制结果。
+
+### 10.4 渲染
+
+两条渲染管线，同一份数据：
+
+* `scripts/render_mujoco.py` → **MuJoCo 渲染器**：真实网格、阴影、随焊枪推进逐段点亮并冷却的焊道、
+  作为**真实光源**的电弧（它照亮工件并投出影子）。快，几分钟出片。
+* `scripts/render_photoreal.py` → **Blender Cycles**：UR10e 原始网格、金属材质、
+  作为体积介质的**焊接烟尘**（电弧的光会在里面散射）、随温度由白热冷却成暗色焊道的着色器。
+  两个机位：单元全景与焊枪特写。
+
+分工是严格的：**weldloop 负责物理，MuJoCo 负责运动学与臂动力学，Blender 只负责像素。**
+画面上烧进去的每一个数字都来自仿真日志；渲染不参与任何计算。
+
+> 渲染过程中修掉的几个 bug 值得记一笔，它们都是"看上去对、其实错"的那类：
+> Blender 的 `primitive_cube_add(size=1.0)` 跨度是 ±0.5，所以 `scale` 给的是**全长**——
+> 我按半长给，焊道只画了半条焊缝，着色器的位置映射也差了一倍；
+> AgX 色调映射会把过亮的自发光**去饱和成白色**，焊道发光强度调到 220 才在正确的曝光下呈现橙色；
+> 焊枪一开始是按"从 TCP 往回量"摆的，而 MJCF 是从法兰量的，于是它飘在半空。
+> 这些都是渲一帧看一眼才发现的，不是靠读代码。
+
+---
+
+## 十一、参数来源声明
 
 仓库中所有数值只有两类：
 
@@ -485,12 +562,12 @@ README 中所有指标数字都由本仓库代码实际运行产生。
 
 ---
 
-## 十一、走向真实硬件时需要替换的适配器
+## 十二、走向真实硬件时需要替换的适配器
 
 | 抽象基类 | 仿真实现 | 真实硬件适配器（待写） |
 |---|---|---|
 | `interfaces.PowerSourceBase` | `sim.cell.SimPowerSource` | 逆变电源现场总线 / SDK |
-| `interfaces.RobotBase` | `sim.cell.SimRobot` | 机器人 EGM / RSI 运动流 |
+| `interfaces.RobotBase` | `sim.cell.SimRobot` 或 `sim.mujoco_cell.MujocoRobot`（UR10e） | 机器人 EGM / RSI 运动流。MuJoCo 版已经是"半只脚踏进真实"：把 `mj_step` 换成 EGM 流、把测量 TCP 换成机器人自身反馈即可，上层不动 |
 | `viz.robot.ArmGeometry` | 通用小型弧焊臂 | 换成实机连杆参数与关节限位，即可用同一套 `solve_path()` 做建线可达性校核 |
 | `interfaces.SensorBase` | `sim.sensors.*` | 每个物理传感器一个 |
 | `sim.seam.make_seam` | 合成间隙曲线 | 激光轮廓仪实测 / 装配扫描 |
