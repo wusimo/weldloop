@@ -273,6 +273,9 @@ class MasterClockLogger:
         self._specs = [c for c in SCHEMA if include_truth or c.real_hw]
         self._cap = int(capacity)
         self._n = 0
+        #: first row a master tick actually wrote; sensor samples that arrive
+        #: before the cell has stepped once are pre-weld and get trimmed
+        self._row_lo: int | None = None
         self._data = {
             c.name: np.full(self._cap, np.nan, dtype=np.float64) for c in self._specs
         }
@@ -354,6 +357,8 @@ class MasterClockLogger:
     def log_truth(self, truth: GroundTruth) -> None:
         """Record the master-clock row: commands, kinematics and ground truth."""
         row = self._row(truth.t)
+        if self._row_lo is None:
+            self._row_lo = row
         cmd = truth.command
         values = [
             truth.v_wire, cmd.I_set, cmd.v_wire_set, cmd.arc_len_set,
@@ -377,25 +382,33 @@ class MasterClockLogger:
 
     # -- finish ----------------------------------------------------------
     def finish(self) -> LogTable:
-        """Resolve the aggregating reducers and trim to the used length."""
+        """Resolve the aggregating reducers and trim to the used length.
+
+        Leading rows before the plant's first tick are dropped, so every
+        per-tick column (including the ground truth) is complete on every row
+        that survives.  A partially-populated first row is a trap for anyone
+        who later writes ``table["truth_gap"].max()``.
+        """
+        lo = self._row_lo or 0
         out: dict[str, np.ndarray] = {}
+        n_rows = max(self._n - lo, 0)
         for spec in self._specs:
             if spec.name == "t":
                 # The master clock is DEFINED by the row index, so it is always
                 # complete even on a tick where nothing sampled.
-                out["t"] = np.arange(self._n, dtype=np.float64) / self.f_master
+                out["t"] = (np.arange(n_rows, dtype=np.float64) + lo) / self.f_master
                 continue
-            arr = self._data[spec.name][: self._n]
+            arr = self._data[spec.name][lo : self._n]
             if spec.reducer in ("mean", "rms"):
-                cnt = self._cnt[spec.name][: self._n]
-                acc = self._acc[spec.name][: self._n]
+                cnt = self._cnt[spec.name][lo : self._n]
+                acc = self._acc[spec.name][lo : self._n]
                 with np.errstate(invalid="ignore", divide="ignore"):
                     val = np.where(cnt > 0, acc / np.maximum(cnt, 1), np.nan)
                     if spec.reducer == "rms":
                         val = np.sqrt(val)
                 arr = val
             out[spec.name] = arr
-        return LogTable(data=out, n_rows=self._n, f_master=self.f_master)
+        return LogTable(data=out, n_rows=n_rows, f_master=self.f_master)
 
 
 # --------------------------------------------------------------------------

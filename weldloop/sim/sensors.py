@@ -178,7 +178,12 @@ class IRCamera(SensorBase):
         T_amb = 300.0
         T = T_amb + (truth.pool.T_pool - T_amb) * atten
         T += c.noise_T * self._rng.standard_normal()
-        w = truth.pool.w * atten + c.noise_w * self._rng.standard_normal()
+        # The pool WIDTH is extracted from the isotherm's gradient, not from an
+        # absolute radiance level, so it is far less sensitive to an overall
+        # attenuation than the peak temperature is.  Same physical cause, much
+        # weaker exponent.
+        w = truth.pool.w * atten**c.ir_width_atten_exp
+        w += c.noise_w * self._rng.standard_normal()
         return SensorSample(
             t=t,
             channels={

@@ -25,4 +25,8 @@ include = ["weldloop*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-filterwarnings = ["error::RuntimeWarning"]
+filterwarnings = [
+    "error::RuntimeWarning",
+    # this demo is CPU-only by design; torch probing an unusable GPU is noise
+    "ignore:CUDA initialization:UserWarning",
+]

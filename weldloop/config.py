@@ -372,6 +372,14 @@ class SensorConfig(BaseModel):
             "calibrated on a nominal weld — so smoke costs you variance, not bias"
         ),
     )
+    ir_width_atten_exp: float = Field(
+        0.35,
+        description=(
+            "how much of the radiance attenuation reaches the pool-WIDTH reading "
+            "[-]; the width comes from an isotherm gradient, the temperature from "
+            "an absolute level, so the width is much less affected"
+        ),
+    )
     ir_blind_smoke: float = Field(
         1.70, description="smoke density above which the IR frame is rejected [-]"
     )
@@ -465,18 +473,60 @@ class EKFConfig(BaseModel):
     """EKF tuning.  Q/R are given as standard deviations, squared internally."""
 
     dt: float = Field(20.0e-3, description="filter update period [s]")
-    q_T: float = Field(18.0, description="process noise std, pool temperature [K/sqrt(s)]")
-    q_w: float = Field(0.55e-3, description="process noise std, pool width [m/sqrt(s)]")
-    q_p: float = Field(0.40e-3, description="process noise std, penetration [m/sqrt(s)]")
-    q_f: float = Field(0.05, description="process noise std, fill ratio [1/sqrt(s)]")
+    q_T: float = Field(60.0, description="process noise std, pool temperature [K/sqrt(s)]")
+    q_w: float = Field(1.60e-3, description="process noise std, pool width [m/sqrt(s)]")
+    q_p: float = Field(1.20e-3, description="process noise std, penetration [m/sqrt(s)]")
+    q_f: float = Field(0.15, description="process noise std, fill ratio [1/sqrt(s)]")
 
-    r_fsc: float = Field(6.0, description="meas. noise std, short-circuit frequency [Hz]")
+    r_fsc: float = Field(
+        9.7,
+        description=(
+            "meas. noise std, short-circuit frequency [Hz]; IDENTIFIED FROM DATA and "
+            "3x larger than the signal's own spread -- at this current the arc is "
+            "globular, so this channel carries almost nothing.  Kept because it "
+            "costs nothing and would matter in short-arc transfer"
+        ),
+    )
     r_power: float = Field(140.0, description="meas. noise std, mean arc power [W]")
     r_larc: float = Field(0.45e-3, description="meas. noise std, arc-length estimate [m]")
     r_ir_T: float = Field(45.0, description="meas. noise std, IR peak temperature [K]")
     r_ir_w: float = Field(0.5e-3, description="meas. noise std, IR pool width [m]")
     r_gap: float = Field(0.20e-3, description="meas. noise std, profiler gap [m]")
-    r_rgb_w: float = Field(2.5e-3, description="meas. noise std, RGB pool width (bad) [m]")
+    r_rgb_w: float = Field(8.0e-3, description="meas. noise std, RGB pool width (bad) [m]")
+    r_ripple_f: float = Field(
+        2.95, description="meas. noise std, ripple frequency [Hz]; IDENTIFIED FROM DATA"
+    )
+    r_ripple_a: float = Field(
+        0.0194e-3,
+        description="meas. noise std, ripple amplitude as arc length [m]; IDENTIFIED FROM DATA",
+    )
+    k_ripple: float = Field(
+        0.94,
+        description=(
+            "measured ripple amplitude / true surface amplitude [-]; the CV loop "
+            "absorbs a few percent of the modulation.  IDENTIFIED FROM DATA "
+            "(scripts/plot_estimation.py reports the value it measures)"
+        ),
+    )
+
+    gap_std_profiler: float = Field(
+        0.20e-3, description="uncertainty on the gap INPUT when the profiler works [m]"
+    )
+    gap_std_blind: float = Field(
+        1.20e-3,
+        description=(
+            "uncertainty on the gap INPUT with no profiler [m] -- the fit-up "
+            "tolerance the procedure has to assume"
+        ),
+    )
+    gap_persistence: float = Field(
+        1.0,
+        description=(
+            "correlation time of the gap-input error [s]; a wrong gap stays wrong "
+            "for about this long, so one step's sensitivity is amplified by "
+            "gap_persistence/dt to get the covariance it will actually accumulate"
+        ),
+    )
 
     p0_T: float = Field(80.0, description="initial std, pool temperature [K]")
     p0_w: float = Field(2.0e-3, description="initial std, pool width [m]")
@@ -529,6 +579,27 @@ class SimConfig(BaseModel):
 class WeldConfig(BaseModel):
     """Root configuration object passed to every component."""
 
+    #: V/I analysis window [s].  200 ms is a compromise: long enough for a 4 Hz
+    #: frequency resolution on the pool ripple, short enough that the pool has
+    #: not moved much within it (its fastest time constant is 20 ms, its
+    #: gap-response constant ~100 ms).
+    estimator_window: float = 0.20
+    #: band searched for the pool-oscillation ripple [Hz]
+    estimator_band: tuple[float, float] = (30.0, 400.0)
+    #: Deliberate plant/model mismatch for the estimator, as multipliers on the
+    #: lumped melt-pool coefficients.  Without this the estimator's model would
+    #: BE the simulator's model, the filter would be unfairly good, and the
+    #: learned residual would have nothing to learn.  These stand in for the
+    #: parameter error you are left with after identifying a reduced-order model
+    #: from a finite amount of real weld data.
+    model_mismatch: dict[str, float] = {
+        "eta_melt": 0.92,
+        "C_cond": 1.12,
+        "k_gap_ar": 0.88,
+        "AR_0": 1.06,
+        "kappa_L": 0.95,
+    }
+
     material: MaterialConfig = Field(default_factory=MaterialConfig)
     consumable: ConsumableConfig = Field(default_factory=ConsumableConfig)
     joint: JointConfig = Field(default_factory=JointConfig)
@@ -554,6 +625,20 @@ class WeldConfig(BaseModel):
         if self.pool.AR_min >= self.pool.AR_max:
             raise ValueError("pool: AR_min must be < AR_max")
         return self
+
+
+def estimator_config(cfg: "WeldConfig") -> "WeldConfig":
+    """A copy of ``cfg`` with ``model_mismatch`` applied to the pool coefficients.
+
+    This is the model the estimator and the controller are allowed to use.  The
+    simulator keeps the unperturbed one.  Anything that evaluates the estimator
+    against ground truth must build its process model through this function,
+    or the result is meaningless.
+    """
+    out = WeldConfig.model_validate(cfg.model_dump())
+    for field, factor in cfg.model_mismatch.items():
+        setattr(out.pool, field, getattr(cfg.pool, field) * factor)
+    return out
 
 
 def default_config(**overrides) -> WeldConfig:
