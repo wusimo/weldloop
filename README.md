@@ -77,8 +77,8 @@
 | Phase 2 | `sim/sensors.py` + `sim/logger.py`，统一主时钟与宽表 schema | ✅ 完成，107 tests |
 | Phase 3 | `estimation/`（V/I 特征 → EKF 融合 + 学习残差），RMSE 对比表 | ✅ 完成，136 tests |
 | Phase 4 | `control/`（baseline vs adaptive vs **RGB 视觉**三方对比），指标对比表 | ✅ 完成，164 tests |
-| Phase 5 | `viz/` + `scripts/run_demo.py`，出图与 metrics.json | ⏳ |
-| Phase 6 | 动画渲染 `out/weldloop.mp4`：俯视热场+烟羽 / 截面熔深 / 相机视角 | ⏳ |
+| Phase 5 | `viz/` + `scripts/run_demo.py`，出图与 metrics.json | ✅ 完成 |
+| Phase 6 | 动画渲染 `out/weldloop.mp4`：俯视热场+烟羽 / 截面熔深 / 相机视角 | ✅ 完成 |
 
 > **关于"用 VLA 直接控制焊枪"**：本演示**不这样做**，理由是时间尺度与可观测性。
 > 电源内环 ~1 ms、运动层 20 ms、任务规划 秒–分钟；熔深对间隙变化的响应时间常数
@@ -99,6 +99,8 @@ python scripts/plot_physics.py           # Phase 1 自检图 -> out/
 python scripts/plot_sensors.py           # Phase 2 传感器图 -> out/
 python scripts/plot_estimation.py        # Phase 3 估计图 + RMSE 表 -> out/
 python scripts/plot_control.py           # Phase 4 三方控制对比 -> out/
+python scripts/run_demo.py --seed 0 --gap-profile step   # 主演示（约 28 s）
+python scripts/render_animation.py       # 动画 -> out/weldloop.mp4（约 2.5 min）
 python scripts/make_dataset.py --n 6     # 生成数据集 -> data/
 python scripts/train_residual.py         # 可选：训练残差网络（无 torch 时自动跳过）
 ```
@@ -384,9 +386,56 @@ Phase 2 实测电弧燃烧期间约 74 % 的帧不可用，剩下的帧熔宽误
 另外整定了：`kp_I`=1.10 / `ki_I`=0.55（电流环）、`k_prod`=0.35（生产率项）、
 `I_slew`=120 A/s（指令限幅，对指标不敏感，纯为真机可用性）。
 
+
 ---
 
-## 八、参数来源声明
+## 八、一条命令跑完整个演示（Phase 5）
+
+```bash
+python scripts/run_demo.py --seed 0 --gap-profile step
+```
+
+在笔记本 CPU 上约 **28 s** 跑完，产生：
+
+| 文件 | 内容 |
+|---|---|
+| `out/summary.png` | **给幻灯片用的单图**：上=间隙曲线，中=真实熔深（定参数 vs 自适应）+ 估计 ±2σ + 验收带，下=原始 5 kHz V/I 与短路事件 |
+| `out/dashboard.png` | 工程视图：两个控制器四行并排（扰动/缺陷/指令/在线估计） |
+| `out/metrics.json` | README 里每一个数字 |
+
+可选参数：`--vision` 加上 RGB 视觉对照组，`--gap-profile {step,ramp,sine,random,constant}`，
+`--no-residual` 强制纯物理。给定 `--seed` 后结果逐位可复现。
+
+`summary.png` 底部那一栏是整个方案的问题陈述：**定参数焊接时间隙从 0 走到 4 mm，
+而电压 26.6 ± 0.02 V、电流 223 ± 3.2 A —— 机器仪表上几乎什么也没发生。**
+信息在波形结构里，这正是 Phase 3 要提取的东西。
+
+---
+
+## 九、动画渲染（Phase 6）
+
+```bash
+python scripts/render_animation.py --seed 0 --gap-profile step
+```
+
+产出 `out/weldloop.mp4`（约 2.5 min 渲染，20 s 视频）。画面分三块：
+
+* **俯视**：Rosenthal 解析温度场、坡口两侧边线、身后凝固的焊道、焊枪（含摆动）、
+  以及从电弧脱落并向后飘散的烟团；
+* **横截面**：按真实比例画出母材、坡口、熔池半椭圆、余高与填充，烧穿时根部标红；
+* **相机**：RGB 与 IR 并排 —— RGB 被烟尘与弧光糊成一片灰噪声并标出"不可用"，
+  IR 仍能画出熔合等温线。这就是 Phase 2 那两个 RMSE 数字的画面版。
+
+两个控制器**按位置同步播放**（而不是按时间），所以同一横坐标上比较的是同一段焊缝；
+每一路各自带一个时钟，循环时间的差别直接看得见。
+
+> **必须说清楚**：这是**同一套降阶物理的可视化**，不是 CFD。温度场是解析解、
+> 熔池是降阶模型的半椭圆、烟羽是程序化烟团。图上写了这句话，因为一张"看起来像 CFD
+> 但不是"的图在提案里是负资产。
+
+---
+
+## 十、参数来源声明
 
 仓库中所有数值只有两类：
 
@@ -399,7 +448,7 @@ README 中所有指标数字都由本仓库代码实际运行产生。
 
 ---
 
-## 九、走向真实硬件时需要替换的适配器
+## 十一、走向真实硬件时需要替换的适配器
 
 | 抽象基类 | 仿真实现 | 真实硬件适配器（待写） |
 |---|---|---|

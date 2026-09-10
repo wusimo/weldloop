@@ -25,6 +25,7 @@ include = ["weldloop*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["slow: renders video or shells out to a script"]
 filterwarnings = [
     "error::RuntimeWarning",
     # this demo is CPU-only by design; torch probing an unusable GPU is noise
