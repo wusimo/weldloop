@@ -220,7 +220,8 @@ MuJoCo 用自己的执行器动力学积分整条手臂；**随后把实际达�
 ```bash
 git clone <this repo> && cd weldloop
 pip install -e .                 # numpy / scipy / matplotlib / pydantic
-python -m pytest -q              # 216 tests
+python -m pytest -q              # 216 tests（未装 mujoco 时自动跳过 16 个机器人在环测试）
+python -m pytest -q -m "not slow"   # 211 tests，约 4 min；slow 的 5 个会渲染视频/起子进程
 
 # 主演示：一条命令，约 28 s
 python scripts/run_demo.py --seed 0 --gap-profile step
@@ -237,6 +238,7 @@ python scripts/plot_control.py       # 三方控制对比
 # 数据集（镜像一期真实采集 schema）
 python scripts/make_dataset.py --n 6
 python scripts/train_residual.py     # 可选；无 torch 时自动跳过
+# 未训练残差时，演示以纯物理运行（README §4.1 的"全部 + 学习残差"一行需要先训练）
 
 # 动画
 python scripts/render_animation.py   # 俯视对比
