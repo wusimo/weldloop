@@ -1,243 +1,82 @@
 # weldloop — 电源在环（Power-Source-in-the-Loop）自适应机器人焊接
 
-> 纯仿真演示仓库，笔记本电脑上一条命令即可端到端运行，无需任何硬件。
-> 所有模块都留有真实硬件适配器接口（`TODO(real-hw)`）。
+> **In one line (EN).** A hardware-free, end-to-end simulation of adaptive robotic
+> GMAW in which the welding power source — not a camera — is the primary process
+> sensor: kHz arc voltage/current drive a physics-prior state estimator of the
+> unobservable weld pool, and a 20 ms motion layer consumes its mean **and its
+> covariance** to hold penetration in band across a 0–4 mm variable root gap.
+> Every number in this document was produced by running the code in this repo.
 
----
-
-## 一、论点（Thesis）
-
-焊接过程中可见光视觉不可靠：烟尘、飞溅、弧光过曝会让 RGB 相机在最需要它的时刻失效。
-**真正持续可用的过程传感器是焊接电源本身** —— kHz 级的电弧电压与电流。本仓库要证明的是：
-熔池状态（熔深、熔宽、热输入、冷却速率）虽然不可直接观测，但可以用
-"降阶熔池物理模型 + EKF + 小残差网络" 的方式在线估计并给出不确定度；再由一个
-10–100 ms 的运动层控制器消费这个带协方差的估计，去调节行走速度、摆动幅度与送丝速度，
-从而在 **0–4 mm 变坡口间隙** 的厚板 MIG/MAG 焊中把熔深稳定在目标带内，同时避免烧穿。
-
-一个必须诚实说明的物理事实（本仓库据此建模）：
-在恒压（CV）GMAW 中，**送丝速度通过熔化平衡钉死了平均电流，机器又钉死了平均电压**，
-所以 V/I 的**直流量几乎不携带熔深信息**。真正携带信息的是熔池自由表面的振荡：
-它调制瞬时弧长，从而在 kHz 电压流中留下可测的纹波——频率对应熔宽、幅值对应熔深。
-`weldloop/physics/arc.py` 实现的正是这个机制，Phase 3 的特征提取器提取的也正是它。
-
----
-
-## 二、三层控制架构（Architecture）
-
-```
-                                   ┌──────────────────────────────────────┐
-   秒–分钟                          │  planning/task_planner.py            │
-   task planning                    │  焊缝 → 分段 + 初始工艺窗口           │
-   (NOT in the real-time loop)      │  TODO: LLM planner hook（离线）       │
-                                   └───────────────┬──────────────────────┘
-                                                   │ 工艺窗口 / 分段
-                                                   ▼
-   10–100 ms                       ┌──────────────────────────────────────┐
-   torch-motion layer               │  control/motion_layer.py             │
-   (本演示的重点)                    │  行走速度 / 摆幅 / 送丝设定值          │
-                                   │  消费 EKF 的 (均值, 协方差)            │
-                                   │  不确定度高 → 保守；预测烧穿 → 提速降流  │
-                                   └──────┬────────────────────┬──────────┘
-                                          │ 设定值              │ 估计
-                                          ▼                    │
-   ~ms                             ┌────────────────────┐      │
-   power-source inner loop          │ control/inner_loop │      │
-   (逆变电源本来就在做的事)          │ 电流波形/弧长 PI    │      │
-                                   └──────┬─────────────┘      │
-                                          ▼                    │
-                                   ┌────────────────────┐      │
-                                   │   sim/cell.py      │      │
-                                   │   WeldCell 5 kHz   │      │
-                                   │   电源自调节 + 电弧  │      │
-                                   │   + 降阶熔池模型     │      │
-                                   └──────┬─────────────┘      │
-                                          │ 传感器             │
-                                          ▼                    │
-                                   ┌────────────────────┐      │
-                                   │  sim/sensors.py    │      │
-                                   │  V/I 5k · 激光 30  │      │
-                                   │  IR 30 · 声 20k    │      │
-                                   │  力 1k · RGB 30    │      │
-                                   └──────┬─────────────┘      │
-                                          ▼                    │
-                                   ┌────────────────────┐      │
-                                   │ estimation/ekf.py  │──────┘
-                                   │ 物理先验 + 残差     │
-                                   │ 输出 均值 + 协方差   │
-                                   └────────────────────┘
-```
-
----
-
-## 三、当前进度
-
-| 阶段 | 内容 | 状态 |
-|---|---|---|
-| Phase 1 | `physics/` + `sim/`（热源、电弧、降阶熔池、焊缝、WeldCell） | ✅ 完成，70 tests |
-| Phase 2 | `sim/sensors.py` + `sim/logger.py`，统一主时钟与宽表 schema | ✅ 完成，107 tests |
-| Phase 3 | `estimation/`（V/I 特征 → EKF 融合 + 学习残差），RMSE 对比表 | ✅ 完成，136 tests |
-| Phase 4 | `control/`（baseline vs adaptive vs **RGB 视觉**三方对比），指标对比表 | ✅ 完成，164 tests |
-| Phase 5 | `viz/` + `scripts/run_demo.py`，出图与 metrics.json | ✅ 完成 |
-| Phase 6 | 动画渲染：俯视对比 `out/weldloop.mp4` + 第三人称 `out/weldloop_robot.mp4` | ✅ 完成 |
-| Phase 7 | **真实机器人在环**：MuJoCo + UR10e，Blender Cycles 照片级渲染 | ✅ 完成 |
-
-> **关于"用 VLA 直接控制焊枪"**：本演示**不这样做**，理由是时间尺度与可观测性。
-> 电源内环 ~1 ms、运动层 20 ms、任务规划 秒–分钟；熔深对间隙变化的响应时间常数
-> ~100 ms，烧穿在 1 s 内发展完毕。VLA 最快也只有几 Hz，而且它的输入相机在
-> Phase 2 中实测有 74 % 的帧不可用。把视觉放进实时回路，等于在视觉最不可靠的
-> 工况下宣称视觉闭环——这与本方案的立论正好相反。
-> AI 出现在两个诚实的位置：`estimation/residual.py`（估计器内的小残差网络）与
-> `planning/task_planner.py`（秒级、离线的任务规划钩子，`TODO(llm-planner)` 标出了接入点：
-> 把作业描述/WPS/装配扫描变成分段与初始工艺窗口，输出只是**起点**，下游本来就会偏离它）。
-> Phase 4 会额外做一路 **RGB 视觉控制器** 作为对照组，用指标把"为什么不用视觉"
-> 从断言变成实测结果。
-
-运行：
+纯仿真、无需硬件，笔记本 CPU 上一条命令端到端跑完。
+所有可被真实硬件替换的部分都在抽象基类后面，并标了 `TODO(real-hw)`。
 
 ```bash
-cd weldloop
-python -m pytest -q                      # 全部测试
-python scripts/plot_physics.py           # Phase 1 自检图 -> out/
-python scripts/plot_sensors.py           # Phase 2 传感器图 -> out/
-python scripts/plot_estimation.py        # Phase 3 估计图 + RMSE 表 -> out/
-python scripts/plot_control.py           # Phase 4 三方控制对比 -> out/
-python scripts/run_demo.py --seed 0 --gap-profile step   # 主演示（约 28 s）
-python scripts/render_animation.py       # 俯视对比动画 -> out/weldloop.mp4（约 2.5 min）
-python scripts/render_robot.py           # 第三人称机器人动画 -> out/weldloop_robot.mp4
-
-# Phase 7：真实机器人在环 + 照片级渲染（需要 pip install "weldloop[robot]" 与 Blender）
-python scripts/render_mujoco.py          # MuJoCo 单元视频 -> out/weldloop_mujoco.mp4
-python scripts/render_photoreal.py --stage all   # 全流程 -> out/weldloop_photoreal.mp4
-python scripts/make_dataset.py --n 6     # 生成数据集 -> data/
-python scripts/train_residual.py         # 可选：训练残差网络（无 torch 时自动跳过）
+pip install -e .
+python scripts/run_demo.py --seed 0 --gap-profile step   # 约 28 s
 ```
 
 ---
 
-## 四、模型说明（Phase 1）
+## 目录
 
-### `physics/heat_source.py`
-经典解析热源，仅作为**结构参考与量级锚点**，不进入实时回路：
-
-* **Rosenthal (1946)** 移动点热源准稳态温度场 → 熔合线等温线的解析宽度/深度；
-* **Goldak (1984)** 双椭球体积热源 → 物理形状正确的功率密度分布。
-
-按**名称**引用，**不引用其中任何参数数值**。所有几何半轴、效率均可配置，需用真实数据标定。
-
-### `physics/melt_pool.py` — 降阶熔池模型
-状态 `x = [T_pool, w, p, f]`（熔池温度、熔宽、熔深、间隙填充率），
-输入 `u = [I, V, v_travel, v_wire, gap, thickness, weave_amp]`。
-方程见该文件顶部 docstring（能量记账 → 熔化体积平衡 → 宽深比分配 → 过热度 → 填充率）。
-稳态精确复现教科书熔化效率关系 `A = η_arc·η_melt·V·I / (ρ·h_m·v)`。
-**烧穿**判据有两条：熔透板厚，或未填满时根部液态跨度超过表面张力桥接极限
-`w_crit = c_st·sqrt(γ/(ρg))`——变间隙工况下先触发的是后者，这也符合实际。
-**未熔合**判据：熔深不足 / 熔池宽度未润湿两侧坡口 / 填充不足。
-
-> 该模型是**控制导向的降阶模型**，不是 CFD/有限元。所有系数都是集总标定常数。
-
-### `physics/arc.py` — 电弧与"电源即传感器"
-静态电弧特性 `V = V_0 + E_a·L_arc + R_stickout(I)·I`；GMAW 熔化（burn-off）律
-`v_wire = a·I + b·stickout·I²`；熔滴过渡模式；熔池表面振荡
-`f_osc = C_osc·sqrt(γ/(ρ(w/2)³))`、`a_osc = k_a·p·(1+k_T·过热度)`；短路频率
-`f_sc ∝ exp(−k·L_arc/a_osc)`。
-
-### `sim/cell.py` — WeldCell
-5 kHz 定步长积分，内含**真实的 GMAW 自调节**：电极伸出长度是一个状态，
-`d(stickout)/dt = v_wire − melting_rate(I, stickout)`，电流由 CV 特性在当前弧长下决定。
-另含三个估计器不知道的慢漂移（导电嘴磨损、焊枪高度波动、烟尘密度），
-这正是让"只用 V/I"的估计存在偏差、从而需要多传感器融合的原因。
-
-`WeldCell.step()` 在给定 seed 下**逐位确定**。
-
+1. [问题](#一问题变间隙让定参数焊接无解)
+2. [场景与设定](#二场景与设定)
+3. [我们的方案](#三我们的方案)
+4. [结果](#四结果全部由本仓库代码运行产生)
+5. [快速开始](#五快速开始)
+6. [仓库结构](#六仓库结构)
+7. [建模的已知局限与改进方向](#七建模的已知局限与改进方向)
+8. [走向真实产线：一期数据采集规范](#八走向真实产线一期数据采集规范)
+9. [参数来源声明](#九参数来源声明)
+10. [我们刻意不做的事](#十我们刻意不做的事)
 
 ---
 
-## 五、传感器套件与采集 schema（Phase 2）
+## 一、问题：变间隙让定参数焊接无解
 
-### 5.1 六个传感器，各自的失效模式
+厚板对接焊的现场现实是**装配间隙沿焊缝在变**。切割公差、点固变形、工装重复性，
+共同造成 0–4 mm 的根部间隙波动。对一套固定的电流/电压/速度参数来说：
 
-| 传感器 | 速率 | 它会在什么地方出错 |
+* 间隙张开处 —— 电弧下方少了母材这个散热体，同样的热输入挖得更深，熔池失去支撑，**烧穿**；
+* 间隙收紧处 —— 同样的送丝量在更小的坡口里，**余高过大**；速度补偿过头则**未熔合**。
+
+要在线补偿，就得知道**熔池现在有多深**。而这正是问题所在：
+
+| 想用的传感器 | 为什么在电弧燃烧时靠不住 |
+|---|---|
+| 可见光相机 | 烟尘遮挡 + 弧光过曝。本仓库实测：**74 % 的帧图像可用度低于阈值**，可用的帧熔宽误差达 7.97 mm（熔池本身才 ~11 mm 宽） |
+| 红外热像 | 能透过焊接烟尘，但只看表面温度与熔宽，**看不到深度** |
+| 激光轮廓仪 | 看的是坡口几何，**不观测熔池**；且飞溅会丢帧 |
+| 超声/射线 | 在线做不到 |
+
+**熔深、熔宽、热输入、冷却速率都不可直接观测。** 这是一个状态估计问题，不是一个传感器选型问题。
+
+---
+
+## 二、场景与设定
+
+| 项 | 设定 | 说明 |
 |---|---|---|
-| `PowerSourceSensor` | 5 kHz | 高斯噪声 + ADC 量化。**从不失效**——这正是本方案的立论点：烟尘、弧光、飞溅都打不掉它 |
-| `SeamProfiler` | 30 Hz | 飞溅导致丢帧（丢帧报 NaN，绝不报一个"看起来合理的错数"）；**前视**安装，给的是预览而不是反馈 |
-| `IRCamera` | 30 Hz | 烟尘衰减辐射。相机在额定烟尘下标定，所以烟尘带来的是**方差**而不是常值偏差；浓烟团时整帧拒绝 |
-| `ArcMic` | 20 kHz | 宽带噪声 + 熔池振荡音调 + 再引弧冲击；比仿真步长还快，一步产生 4 个样本 |
-| `TorchForce` | 1 kHz | 被电弧力主导，看不到熔池；只用于与短路统计互证 |
-| `RGBCamera` | 30 Hz | **专门放进来演示它会瞎**：烟尘衰减系数远大于 IR，叠加弧光过曝 |
-
-实测（`seed=0`，200 mm 阶跃间隙焊缝，由 `scripts/plot_sensors.py` 产生）：
-
-* IR 熔宽 RMSE **0.83 mm**，RGB 熔宽 RMSE **7.97 mm**（熔池本身才 ~11 mm 宽）；
-* RGB 有 **74 %** 的帧图像可用度低于阈值；即使"可用"的帧，其读数噪声也已达到熔宽量级；
-* 激光轮廓仪领先电弧 **2.7 s** 看到间隙变化（12 mm 前视 / 4.5 mm·s⁻¹）；
-* **规则：RGB 永远不作为过程传感器使用。** 它只出现在 Phase 3 RMSE 表的"反面例子"一行。
-
-### 5.2 主时钟与宽表规则
-
-1. **一个主时钟。** 每一行是同一个时钟的一拍（默认 5 kHz，即电源采样率）。传感器按**自己的时间戳**入表，而不是按软件何时读到。
-2. **NaN 表示"该时刻没有采样"。** 30 Hz 相机每 167 行填一行。写文件时**不做前向填充**——插值是分析阶段的选择，把它烘进日志会毁掉"数据何时真正到达"这一证据。
-3. **比主时钟更快的通道做块内聚合，而不是丢弃。** 20 kHz 麦克风每个主拍贡献一个 RMS 和一个咔哒计数；schema 的 `聚合` 列写明每个值的含义。真实产线上原始流单独存盘，块特征进主表——这里的 schema 就是照这个写的。
-4. **真值被隔离。** 真实产线拿不到的列一律以 `truth_` 前缀标注、`real_hw=False`。估计器与控制器只能看到 `LogTable.real_hw_view()`；打分代码才读 `truth_` 列。有一条测试专门保证真值不会泄漏进控制器可见的 `Observation`。
-
-`scripts/make_dataset.py` 按此 schema 生成数据集（Parquet，无 pyarrow 时退化为 gzip CSV），并附 `manifest.json` 与 `SCHEMA.md`。
-
-### 5.3 采集 schema（= 一期真实采集建议表）
-
-| column | unit | source | rate [Hz] | 主时钟聚合 | 真实产线可得 | 说明 |
-|---|---|---|---|---|---|---|
-| `t` | s | master clock | 5000 | last | ✅ | master clock time; one row per tick |
-| `ps_V` | V | power source | 5000 | last | ✅ | arc voltage, raw (short-circuit collapses included) |
-| `ps_I` | A | power source | 5000 | last | ✅ | welding current, raw (short-circuit surges included) |
-| `ps_short` | - | power source | 5000 | max | ✅ | 1 while a short circuit is active |
-| `ps_v_wire` | m/s | power source | 5000 | last | ✅ | wire feed speed from the drive tacho |
-| `ps_V_set` | V | power source | 5000 | last | ✅ | machine set voltage (what the CV loop is holding) |
-| `prof_gap` | m | laser profiler | 30 | last | ✅ | root gap measured AHEAD of the arc; NaN on spatter dropout |
-| `prof_offset` | m | laser profiler | 30 | last | ✅ | lateral seam offset ahead of the arc |
-| `prof_lead_s` | m | laser profiler | 30 | last | ✅ | seam station the profiler was looking at |
-| `prof_valid` | - | laser profiler | 30 | last | ✅ | 0 on dropout; a dropout is never reported as a plausible number |
-| `ir_T_peak` | K | IR camera | 30 | last | ✅ | peak apparent pool temperature; smoke-attenuated |
-| `ir_pool_width` | m | IR camera | 30 | last | ✅ | pool width from the melting isotherm |
-| `ir_valid` | - | IR camera | 30 | last | ✅ | 0 when the frame is rejected (dense plume) |
-| `mic_p` | Pa | arc microphone | 20000 | rms | ✅ | RMS over the master tick of the 20 kHz acoustic pressure |
-| `mic_click` | count | arc microphone | 20000 | sum | ✅ | short-circuit re-ignition clicks in this master tick |
-| `force_N` | N | torch force | 1000 | last | ✅ | torch reaction force; dominated by arc force |
-| `rgb_quality` | - | RGB camera | 30 | last | ✅ | image usability = smoke transmission x glare rejection |
-| `rgb_pool_width` | m | RGB camera | 30 | last | ✅ | pool width from the visible image; noise scales as 1/quality |
-| `rgb_valid` | - | RGB camera | 30 | last | ✅ | 0 when quality is below the usable threshold |
-| `cmd_I_set` | A | controller | 5000 | last | ✅ | commanded current setpoint |
-| `cmd_v_wire_set` | m/s | controller | 5000 | last | ✅ | commanded wire feed speed |
-| `cmd_arc_len_set` | m | controller | 5000 | last | ✅ | commanded arc length |
-| `cmd_v_travel` | m/s | controller | 5000 | last | ✅ | commanded travel speed |
-| `cmd_weave_amp` | m | controller | 5000 | last | ✅ | commanded weave half-amplitude |
-| `rb_s` | m | robot encoder | 5000 | last | ✅ | torch position along the seam |
-| `rb_v_travel` | m/s | robot encoder | 5000 | last | ✅ | actual travel speed |
-| `rb_weave_offset` | m | robot encoder | 5000 | last | ✅ | instantaneous lateral weave offset |
-| `rb_ctwd` | m | robot | 5000 | last | ✅ | commanded contact-tip-to-work distance |
-| `truth_gap` | m | simulator | 5000 | last | ❌ 仅仿真 | true root gap under the arc |
-| `truth_offset` | m | simulator | 5000 | last | ❌ 仅仿真 | true lateral misalignment |
-| `truth_T_pool` | K | simulator | 5000 | last | ❌ 仅仿真 | true mean pool temperature |
-| `truth_pool_w` | m | simulator | 5000 | last | ❌ 仅仿真 | true pool width |
-| `truth_penetration` | m | simulator | 5000 | last | ❌ 仅仿真 | true penetration depth — the quantity being estimated |
-| `truth_fill` | - | simulator | 5000 | last | ❌ 仅仿真 | true gap fill ratio |
-| `truth_stickout` | m | simulator | 5000 | last | ❌ 仅仿真 | true electrode extension |
-| `truth_arc_len` | m | simulator | 5000 | last | ❌ 仅仿真 | true mean arc length including pool depression |
-| `truth_f_osc` | Hz | simulator | 5000 | last | ❌ 仅仿真 | true pool oscillation frequency |
-| `truth_a_osc` | m | simulator | 5000 | last | ❌ 仅仿真 | true pool oscillation amplitude |
-| `truth_f_sc` | Hz | simulator | 5000 | last | ❌ 仅仿真 | true expected short-circuit rate |
-| `truth_smoke` | - | simulator | 5000 | last | ❌ 仅仿真 | true smoke density |
-| `truth_burn_through` | - | simulator | 5000 | max | ❌ 仅仿真 | 1 while the burn-through condition holds |
-| `truth_lack_of_fusion` | - | simulator | 5000 | max | ❌ 仅仿真 | 1 while any lack-of-fusion condition holds |
-
+| 工艺 | MIG/MAG（GMAW），实心焊丝 φ1.2 mm | 恒压（CV）逆变电源，协同曲线 |
+| 母材 | 低碳钢（Q235/S235 级），板厚 **6 mm** | 单道方形对接；多道厚板是同一控制问题按道重复 |
+| 扰动 | 根部间隙 **g(s) = 0–4 mm** 沿焊缝变化 | 支持 step / ramp / sine / random / constant 五种分布 |
+| 标称工艺 | 230 A / 26.5 V / 4.5 mm·s⁻¹ / 6.88 m·min⁻¹ | 在"零间隙"处合格，即真实 WPS 的评定方式 |
+| 验收 | 熔深 ∈ **[3.0, 5.0] mm**，目标 4.0 mm | 烧穿 = 熔透板厚或根部液态跨度超过表面张力桥接极限 |
+| 机器人 | 行走速度伺服 **或** MuJoCo 中的真实 UR10e | 见 §4.5 |
+| 传感器 | 电源 5 kHz、激光轮廓仪 30 Hz、IR 30 Hz、电弧麦克风 20 kHz、焊枪测力 1 kHz、RGB 30 Hz | 全部在统一主时钟上 |
 
 ---
 
-## 六、状态估计（Phase 3）
+## 三、我们的方案
 
-### 6.1 先说一个不方便但必须说的事实
+### 3.1 立论：把电源本身当作主过程传感器
 
-原始设想是"平均电弧功率和短路频率就能跟上熔深"。**实测：不行。**
-在恒压 GMAW 中，送丝速度通过熔化平衡钉死平均电流，机器钉死平均电压，所以直流量几乎不动。
-下表是 seed=0、200 mm 阶跃间隙焊缝上，每个 V/I 特征与真实熔深的相关系数（由代码实测）：
+电源是唯一在烟尘、弧光、飞溅中**始终工作**的传感器。但有一个不方便的事实必须先说清楚：
+
+> **在恒压 GMAW 中，V/I 的直流量几乎不携带熔深信息。**
+> 送丝速度通过熔化平衡（送进量 = 熔化量）钉死了平均电流，CV 机器钉死了平均电压。
+
+本仓库实测的相关系数（seed=0，200 mm 阶跃间隙焊缝）：
 
 | V/I 特征 | 与真实熔深的 \|相关系数\| |
 |---|---|
@@ -246,262 +85,121 @@ python scripts/train_residual.py         # 可选：训练残差网络（无 tor
 | 短路频率 `f_sc` | 0.40 |
 | 平均电流 `I` | 0.29 |
 | 平均电弧功率 `V·I` | 0.29 |
-| 弧长估计 `L_arc_est` | 0.26 |
-| 平均电压 `V` | 0.01 |
+| **平均电压 `V`** | **0.01** |
 
-信息在**波形结构**里，不在直流量里。物理机制是熔池自由表面振荡调制瞬时弧长：
+信息在**波形结构**里。物理机制是熔池自由表面振荡调制瞬时弧长：
 
-* `f_ripple = C_osc·sqrt(γ/(ρ(w/2)³))` → **熔宽**，实测增益 0.999、残差 RMS 2.95 Hz；
-* `a_ripple = k·a_osc(p, 过热度)` → **熔深**，实测增益 0.940、残差 RMS 0.019 mm。
-
-> 注意：`f_ripple` 直接测的是熔宽，它与熔深的高相关来自本工况下"间隙张开 → 熔池变窄变深"的耦合。
-> 这一步转换由 EKF 的物理模型完成，而不是把频率当熔深用。
-> 另外 `f_sc` 的实测噪声（9.7 Hz）比信号本身的变化幅度（3.1 Hz）还大 —— 在 230 A 熔滴过渡下它几乎不带信息。
-> 保留它是因为代价为零，且在短路过渡工况下它会变得重要。
-
-### 6.2 EKF 设计要点
-
-* **过程模型故意与被控对象不一致**。估计器跑的是 `config.estimator_config()`
-  ——把降阶模型系数扰动 5–12 % 后的副本，代表"用有限真实数据辨识后残留的参数误差"。
-  否则估计器就是在用仿真器自己的模型解自己的题，结果没有意义，残差网络也无事可学。
-* **测量协方差 R 由数据辨识**，不是拍脑袋给的（见 6.1 的残差 RMS）。
-* **滑窗特征的相关性被显式处理**：V/I 特征窗长 200 ms、步长 20 ms，相邻窗共享 90 % 的样本，
-  把它们当独立测量会让协方差按 √N 假性收缩——这正是"自信地错"的成因。R 按重叠倍数放大。
-* **坡口间隙是模型输入，不是测量**。轮廓仪不观测熔池；间隙错了，新息无法纠正，只会污染预测。
-  因此间隙的不确定度被显式传播进 P（`gap_std_blind` 1.2 mm / `gap_std_profiler` 0.2 mm）。
-  这也是"仅 V/I"与"V/I + 轮廓仪"差距的来源。
-* **输出协方差供控制器消费**，Phase 4 的运动层据此变保守。
-
-### 6.3 RMSE 对比表（seed=0，200 mm 阶跃间隙焊缝，全部由本仓库代码运行产生）
-
-| 传感器组合 | 熔深 RMSE [mm] | 熔深偏差 [mm] | 熔宽 RMSE [mm] | 滤波器自报 σ_p [mm] | 2σ 覆盖率 |
-|---|---|---|---|---|---|
-| 仅电源 V/I | 0.446 | −0.384 | 0.234 | 0.380 | 0.93 |
-| V/I + 激光轮廓仪 | 0.380 | −0.350 | 0.192 | 0.306 | 0.95 |
-| 全部（V/I + 轮廓仪 + IR） | 0.336 | −0.308 | 0.204 | 0.305 | 0.98 |
-| **仅 RGB 相机（反面例子）** | **1.388** | −1.240 | 1.686 | **1.231** | 0.98 |
-| 全部 + 学习残差 | **0.127** | −0.036 | 0.212 | 0.321 | 1.00 |
-
-读法：
-
-1. **只用电源就已经可用**：0.45 mm RMSE，无相机、无轮廓仪。这是本方案的核心主张。
-2. 加轮廓仪与 IR 逐步收敛到 0.34 mm，且**协方差单调收缩**（σ_w：0.69 → 0.44 → 0.36 mm），
-   即滤波器确实"知道自己知道得更多了"。
-3. **RGB 是反面例子**：误差 1.39 mm（熔深本身才 3–5.5 mm），但滤波器自报 σ 1.23 mm ——
-   它诚实地报告"我不知道"，而不是自信地错。这正是为什么 RGB 不进实时回路。
-4. **学习残差**把误差降到 0.13 mm、偏差降到 −0.04 mm。它修正的是**动力学**而非测量，
-   即那部分"辨识不准"的模型误差。残差在 seeds 100–102 的 step/ramp/sine 焊缝上训练，
-   在完全未见的焊缝上验证：
-
-   | 未见焊缝 | 全部传感器 | + 学习残差 |
-   |---|---|---|
-   | step, seed 0 | 0.336 mm | 0.127 mm |
-   | random, seed 7 | 0.438 mm | 0.243 mm |
-   | sine, seed 11 | 0.407 mm | 0.186 mm |
-   | ramp, seed 13 | 0.304 mm | 0.100 mm |
-
-   无 torch 时 `load_residual()` 返回 `None`，EKF 退化为纯物理，README 两种结果都给出，
-   学习部分从不是必需项。
-5. 一个诚实的不足：加了残差后误差 0.13 mm 而 σ 仍 0.32 mm，滤波器变**偏保守**——
-   因为 Q 是按无残差模型调的。生产版本应在带残差的条件下重新整定 Q。
-
-
----
-
-## 七、控制器对比（Phase 4）
-
-### 7.1 三层时间尺度是真的分开跑的
-
-| 层 | 周期 | 代码 | 它在做什么 |
-|---|---|---|---|
-| 原始 V/I 流 | 0.2 ms | `AdaptiveController.on_samples` | 把 5 kHz 波形推进特征环形缓冲（真实产线上是 DAQ 回调） |
-| 电源内环 | 2 ms | `control/inner_loop.py` | 用送丝速度给电流、用设定电压给弧长，各一个慢 PI |
-| 运动层 | 20 ms | `control/motion_layer.py` | 提特征 → EKF → 决定行走速度/摆幅/电流 |
-
-`inner_loop.py` **只做逆变电源本来就没做的那一点点**：CV 机器已经自己稳弧长、
-自己靠熔化平衡调节伸出长度（10 ms 量级），再加一个跟它抢方向盘的控制器只会更糟。
-
-### 7.2 手柄分配
-
-| 手柄 | 角色 | 依据 |
-|---|---|---|
-| **电流**（经送丝） | 熔深的主要权限 | 直接、强；PI 跟踪 `p_target`，band 违规项权重是跟踪项的 `w_safety`=2 倍 |
-| **行走速度** | 生产率手柄 | 只在"整个 ±k·σ 区间都在验收带内"**且**"电流环还有余量"时才提速；上限由填充能力硬卡 |
-| **摆幅** | 桥接间隙 / 润湿两侧 / 缓解过熔深 | 由前视间隙前馈 + 熔宽下置信界驱动 |
-
-**不确定度是怎么变贵的**：提速量正比于置信区间到验收带边缘的 *余量*。
-区间越宽 → 余量越小 → 不提速。保守不是额外打的补丁，是从这一条里自然掉出来的。
-硬安全另走一路：用过程模型把当前估计外推 `horizon`=0.25 s，若预测熔深（含 σ 裕度）
-触到 `bt_margin`×板厚，立即提速 + 降流 + 满摆，完全绕开 PI。
-
-电流指令带 `I_slew`=120 A/s 限幅。没有它，PI 会去追估计量每一拍的噪声，
-机器在 50 Hz 上摆几十安培——纸面没问题，真机上不可接受，而且电弧声就能听出来。
-
-### 7.3 指标对比（seed=0，200 mm 阶跃间隙 0–4 mm，6 mm 板）
-
-| 控制器 | 烧穿孔洞 | 烧穿长度 | 未熔合 | 熔深 std | 在带内 | 无缺陷长度 | 平均速度 | 循环时间 |
-|---|---|---|---|---|---|---|---|---|
-| 定参数 baseline | **10** | **35.6 mm** | 1.2 mm | 0.60 mm | 73.4 % | 82.2 % | 4.50 mm/s | 44.4 s |
-| RGB 视觉 vision | 3 | 3.8 mm | 4.5 mm | 0.47 mm | 96.6 % | 95.9 % | 2.69 mm/s | **74.4 s** |
-| **自适应 adaptive** | **0** | **0.0 mm** | **0.0 mm** | **0.18 mm** | **100 %** | **100 %** | 4.33 mm/s | 46.2 s |
-| 自适应 + 学习残差 | **0** | **0.0 mm** | **0.0 mm** | 0.19 mm | **100 %** | **100 %** | 4.23 mm/s | 47.3 s |
-
-"孔洞"只统计持续长度 ≥ `min_hole_length`(0.2 mm) 的连续段——毫秒级的判据抖动不是板上的洞，
-按采样点数去数会得到一个随采样率变化的假指标。
-
-### 7.4 五条焊缝上的稳健性（step×2 / ramp / random / sine，150 mm）
-
-单条焊缝的漂亮结果说明不了什么，所以把三方对比在 5 条不同 seed、不同间隙形状的焊缝上重跑：
-
-| 控制器 | 平均孔洞数 | 平均烧穿长度 | 平均未熔合 | 平均熔深 std | 平均在带内 | 平均循环时间 |
-|---|---|---|---|---|---|---|
-| 定参数 baseline | 4.0 | 7.9 mm | 0.0 mm | 0.45 mm | 79.0 % | 33.3 s |
-| **自适应 adaptive** | **0.0** | **0.1 mm** | 0.1 mm | **0.19 mm** | **99.2 %** | **33.3 s** |
-| RGB 视觉 vision | 0.0 | 0.3 mm | 2.4 mm | 0.38 mm | 99.1 % | 54.8 s |
-
-**自适应把烧穿长度降到 1/79、熔深标准差减半、在带内比例从 79 % 提到 99 %，而循环时间一模一样。**
-
-### 7.5 关于 RGB 视觉这一路，结论要说准确
-
-它不是"把焊缝焊废了"。它做出的焊缝基本可接受——**代价是慢了 65 %**。
-机理很清楚：它的熔深估计偏差 1.2 mm、自报 σ 也是 1.2 mm，于是 7.2 节里的提速条件
-（"整个置信区间都在带内"）几乎永远不成立，它只能一路爬行；而且它频繁触发烧穿预警。
-所以正确的说法是：
-
-> 把视觉放进实时回路，不是会立刻出事，而是**你要用 65 % 的节拍去买它的不确定度**，
-> 并且换来的仍然是更差的熔深控制（std 0.38 mm vs 0.19 mm）与 24 倍的未熔合长度。
-
-对照实验是干净的：**两路用的是同一套控制律、同一个物理先验 EKF、同样的协方差处理，
-唯一区别是哪些测量进了滤波器。** 差距只能归到传感器。
-（这一路也**不是** VLA/学习策略，本仓库不做那种声称；但同样的问题会原样传给任何策略类：
-Phase 2 实测电弧燃烧期间约 74 % 的帧不可用，剩下的帧熔宽误差与熔池本身同量级。
-换个策略类救不了一个被遮蔽的传感器。）
-
-### 7.6 调了什么参数（按 Phase 4 的要求说明）
-
-初版自适应控制器**输给了** baseline：循环时间 97.7 s（+120 %），且烧穿更多。三处修正：
-
-1. **发现一个真 bug**：控制器根本没拿到间隙。`rb_s`/`rb_v_travel` 是日志列，不是传感器通道，
-   `Observation` 里压根没有机器人反馈，所以前视预览一直读到 0。
-   已在 `Observation.update_machine()` 中补上（只写真实产线可得的机器侧回读，不碰任何 `truth_`）。
-2. **重新分配手柄**。初版用行走速度控熔深、送丝控填充，结果两者互相打架：零间隙时填充前馈把电流
-   压到下限，熔深塌了，速度环又把速度压到下限去补，节拍翻倍。改为电流控熔深、速度控生产率
-   （填充作为速度的单边上限）。
-3. **安全监视器不许比自己的信念更乐观**：`p_pred = max(模型外推, p_hat)`。
-   模型已知有偏，滤波器正靠测量把状态顶住，外推值系统性偏低。
-
-另外整定了：`kp_I`=1.10 / `ki_I`=0.55（电流环）、`k_prod`=0.35（生产率项）、
-`I_slew`=120 A/s（指令限幅，对指标不敏感，纯为真机可用性）。
-
-
----
-
-## 八、一条命令跑完整个演示（Phase 5）
-
-```bash
-python scripts/run_demo.py --seed 0 --gap-profile step
+```
+f_osc = C_osc · sqrt(γ / (ρ·(w/2)³))          → 熔宽      实测增益 0.999，残差 2.95 Hz
+a_osc = k_a · p · (1 + k_T · 过热度)           → 熔深      实测增益 0.940，残差 0.019 mm
+f_sc  = f_max · bell(I) · exp(-k·L_arc/a_osc)  → 二者，很弱
 ```
 
-在笔记本 CPU 上约 **28 s** 跑完，产生：
+一个由此得到的、可以直接放进幻灯片的数字：**定参数焊接时间隙从 0 走到 4 mm，
+而机器仪表上电压 26.6 ± 0.02 V、电流 223 ± 3.2 A —— 什么也没发生。**
 
-| 文件 | 内容 |
+### 3.2 三层控制，按时间尺度分工
+
+```
+   秒–分钟   任务规划     planning/task_planner.py    焊缝 → 分段 + 初始工艺窗口（离线，LLM 钩子在此）
+     ↓
+   10–100 ms 运动层       control/motion_layer.py     行走速度 / 摆幅 / 电流设定值 ← 消费估计的均值与协方差
+     ↓
+     ~2 ms  电源内环      control/inner_loop.py       送丝给电流、设定电压给弧长（逆变电源本就在做的事）
+     ↓
+    0.2 ms  被控对象      sim/cell.py                 电源自调节 + 电弧 + 降阶熔池，5 kHz
+```
+
+三个时间尺度**是真的分开跑的**：0.2 ms 的 DAQ 回调把 5 kHz 波形推进特征缓冲，
+2 ms 的内环整定电气设定值，20 ms 的运动层重新决策。
+
+### 3.3 估计器：物理先验 + EKF + 小残差网络
+
+* **过程模型**是四状态降阶熔池 ODE（`physics/melt_pool.py`）：
+  `x = [T_pool, 熔宽 w, 熔深 p, 填充率 f]`，结构借自 Rosenthal(1946) 与 Goldak(1984)，
+  系数全为集总标定常数。
+* **过程模型故意与被控对象不一致**（`config.model_mismatch`，系数扰动 5–12 %），
+  代表"用有限真实数据辨识后残留的参数误差"。否则估计器就是在用仿真器自己的模型解自己的题。
+* **测量协方差 R 由数据辨识**，不是拍脑袋给的。
+* **滑窗相关性被显式处理**：特征窗长 200 ms、步长 20 ms，相邻窗共享 90 % 样本；
+  把它们当独立测量会让协方差按 √N 假性收缩——这正是"自信地错"的成因。
+* **坡口间隙是模型输入，不是测量**。轮廓仪不观测熔池；间隙错了新息无法纠正，只会污染预测。
+  因此间隙的不确定度被显式传播进协方差。
+* **输出协方差供控制器消费**。
+
+### 3.4 运动层：不确定度是怎么变贵的
+
+| 手柄 | 角色 |
 |---|---|
-| `out/summary.png` | **给幻灯片用的单图**：上=间隙曲线，中=真实熔深（定参数 vs 自适应）+ 估计 ±2σ + 验收带，下=原始 5 kHz V/I 与短路事件 |
-| `out/dashboard.png` | 工程视图：两个控制器四行并排（扰动/缺陷/指令/在线估计） |
-| `out/metrics.json` | README 里每一个数字 |
+| **电流**（经送丝） | 熔深的主要权限；PI 跟踪目标，band 违规项权重是跟踪项的 2 倍 |
+| **行走速度** | 生产率手柄。只在"整个 ±kσ 区间都在验收带内"**且**"电流环还有余量"时才提速；上限由填充能力硬卡 |
+| **摆幅** | 桥接间隙、润湿两侧坡口、缓解过熔深 |
 
-可选参数：`--vision` 加上 RGB 视觉对照组，`--gap-profile {step,ramp,sine,random,constant}`，
-`--no-residual` 强制纯物理。给定 `--seed` 后结果逐位可复现。
+提速量正比于置信区间到验收带边缘的**余量**。区间越宽 → 余量越小 → 不提速。
+**保守不是额外打的补丁，是从目标函数里自然掉出来的。**
+另有一条硬安全：用过程模型把当前估计外推 0.25 s，若预测熔深（含 σ 裕度）触到
+`0.85 × 板厚`，立即提速 + 降流 + 满摆，完全绕开 PI。
 
-`summary.png` 底部那一栏是整个方案的问题陈述：**定参数焊接时间隙从 0 走到 4 mm，
-而电压 26.6 ± 0.02 V、电流 223 ± 3.2 A —— 机器仪表上几乎什么也没发生。**
-信息在波形结构里，这正是 Phase 3 要提取的东西。
+### 3.5 机器人在环（可选）
 
----
-
-## 九、动画渲染（Phase 6）
-
-### 9.1 俯视对比 `scripts/render_animation.py`
-
-```bash
-python scripts/render_animation.py --seed 0 --gap-profile step
-```
-
-产出 `out/weldloop.mp4`（约 2.5 min 渲染，20 s 视频）。画面分三块：
-
-* **俯视**：Rosenthal 解析温度场、坡口两侧边线、身后凝固的焊道、焊枪（含摆动）、
-  以及从电弧脱落并向后飘散的烟团；
-* **横截面**：按真实比例画出母材、坡口、熔池半椭圆、余高与填充，烧穿时根部标红；
-* **相机**：RGB 与 IR 并排 —— RGB 被烟尘与弧光糊成一片灰噪声并标出"不可用"，
-  IR 仍能画出熔合等温线。这就是 Phase 2 那两个 RMSE 数字的画面版。
-
-两个控制器**按位置同步播放**（而不是按时间），所以同一横坐标上比较的是同一段焊缝；
-每一路各自带一个时钟，循环时间的差别直接看得见。
-
-> **必须说清楚**：这是**同一套降阶物理的可视化**，不是 CFD。温度场是解析解、
-> 熔池是降阶模型的半椭圆、烟羽是程序化烟团。图上写了这句话，因为一张"看起来像 CFD
-> 但不是"的图在提案里是负资产。
-
-
-### 9.2 第三人称机器人视角 `scripts/render_robot.py`
-
-```bash
-python scripts/render_robot.py --seed 0 --gap-profile step
-```
-
-产出 `out/weldloop_robot.mp4`：一台机械臂端着焊枪沿焊缝走，母材按解析温度场发亮，
-焊道在枪后凝固变暗，烟尘从电弧升起；右侧同步给出 RGB / IR 相机画面与熔池横截面，
-底部是两种控制方式的真实熔深对比，并在"定参数在此处已烧穿"的位置弹出提示。
-
-**哪些是真的、哪些是布景（必须分清）**
-
-| 内容 | 来源 |
-|---|---|
-| 焊枪位置、行走速度、摆动、电流电压、熔宽熔深、烟尘密度、缺陷标志 | **仿真日志**，与其余所有图表同源 |
-| 母材表面温度场 | **Rosenthal 解析解**，用当前瞬时功率与行走速度算出 |
-| 关节角 | 对上述 TCP 轨迹做**逆运动学**，并校核关节限位 |
-| 连杆长度、焊枪外形、烟团与火花 | **布景**。不参与任何物理计算——把机械臂整个删掉，焊缝一模一样 |
-
-`weldloop/viz/robot.py` 是一台**通用小型弧焊臂**（0.64 m 臂展，肘型 + 球型腕）的运动学，
-连杆参数可配置、不取自任何厂商样本。它不只是画着好看：
-
-* 正/逆运动学互为逆映射，测试断言 TCP 位姿往返误差 < 1e-11；
-* 逆解在工作空间外**抛异常**而不是返回一个看似合理的错值；
-* `solve_path()` 对整条焊缝求解并报告"是否可达、最差关节余量、腕部是否接近奇异"。
-  这正是运动学模型平常的用途——**建线之前先确认这条轨迹机器人走得了**。
-
-一个实际发现：最初为了取景把机器人放得离工件很近，结果**肘关节只剩 6° 余量**；
-按"最大化最差关节余量"重新选底座位置后变成 **39°**。这条搜索就在模块的 docstring 里。
-另一个：`atan2` 在 ±π 处回绕，会让腕部滚转在焊缝中段跳 2π、渲染出来机械臂会"抽一下"；
-`solve_path()` 现在做 `np.unwrap`，并有一条测试专门盯住它。
-
-
----
-
-## 十、真实机器人在环与照片级渲染（Phase 7）
-
-前六个阶段把机械臂当作一个"行走速度伺服"，因为焊接物理只需要焊枪的位置与速度。
-这站得住脚，但留下两个客户一定会问的问题：**真机走得了这套运动吗？跟踪误差会把焊缝弄成什么样？**
-
-### 10.1 把 UR10e 放进回路
-
-`weldloop/sim/mujoco_cell.py` 用 MuJoCo 搭了一个真实焊接单元：
-**MuJoCo Menagerie 原版 UR10e**（真实连杆惯量、关节限位、随模型发布的 PD 位置执行器）、
-焊枪、工作台、夹具与工件。它实现的是**同一个 `RobotBase` 接口**——这正是那个抽象基类存在的意义：
+`sim/mujoco_cell.py` 在 MuJoCo 里搭了真实单元：**MuJoCo Menagerie 原版 UR10e**
+（真实连杆惯量、关节限位、随模型发布的 PD 位置执行器）+ 焊枪 + 工作台 + 夹具 + 工件。
+它实现同一个 `RobotBase` 接口：
 
 ```python
 robot = MujocoRobot(cfg, seam)              # 一台真的 6 轴机械臂
 simulate(cfg, controller=..., robot=robot)  # 其余一行都不用改
 ```
 
-* 指令路径参数仍由控制器的行走速度积分而来（与 `SimRobot` 同一套律，比较才公平）；
-* 阻尼最小二乘微分逆解把 TCP 位姿变成关节目标；
-* MuJoCo 用自己的执行器动力学积分整条手臂；
-* **随后把实际达到的 TCP 反投影回焊缝，交给焊接物理**。
+指令路径仍由控制器的行走速度积分而来；阻尼最小二乘微分逆解把 TCP 位姿变成关节目标；
+MuJoCo 用自己的执行器动力学积分整条手臂；**随后把实际达到的 TCP 反投影回焊缝，交给焊接物理**。
+跟踪误差、伺服滞后与摆动衰减会真的传到熔池里。
 
-于是跟踪误差、伺服滞后与摆动衰减会真的传到熔池里。
+---
 
-### 10.2 结论在真机上是否成立
+## 四、结果（全部由本仓库代码运行产生）
+
+### 4.1 状态估计：熔深 RMSE（seed=0，200 mm 阶跃间隙焊缝）
+
+| 传感器组合 | 熔深 RMSE | 偏差 | 滤波器自报 σ | 2σ 覆盖率 |
+|---|---|---|---|---|
+| **仅电源 V/I** | **0.446 mm** | −0.384 | 0.380 | 0.93 |
+| V/I + 激光轮廓仪 | 0.380 mm | −0.350 | 0.306 | 0.95 |
+| 全部（V/I + 轮廓仪 + IR） | 0.336 mm | −0.308 | 0.305 | 0.98 |
+| **仅 RGB 相机（反面例子）** | **1.388 mm** | −1.240 | **1.231** | 0.98 |
+| 全部 + 学习残差 | **0.127 mm** | −0.036 | 0.321 | 1.00 |
+
+三个要点：
+1. **只用电源就已经可用**：0.45 mm，无相机、无轮廓仪。这是本方案的核心主张。
+2. 加传感器后**协方差单调收缩**（σ_w：0.69 → 0.44 → 0.36 mm），滤波器确实"知道自己知道得更多了"。
+3. **RGB 是反面例子**：误差 1.39 mm（熔深本身才 3–5.5 mm），但滤波器自报 σ 1.23 mm ——
+   它诚实地报告"我不知道"，而不是自信地错。
+
+### 4.2 控制：定参数 vs 自适应 vs RGB 视觉
+
+| 控制器 | 烧穿孔洞 | 烧穿长度 | 未熔合 | 熔深 std | 在带内 | 无缺陷长度 | 循环时间 |
+|---|---|---|---|---|---|---|---|
+| 定参数 baseline | **10** | **35.6 mm** | 1.2 mm | 0.60 mm | 73.4 % | 82.2 % | 44.4 s |
+| RGB 视觉 vision | 3 | 3.8 mm | 4.5 mm | 0.47 mm | 96.6 % | 95.9 % | **74.4 s** |
+| **自适应 adaptive** | **0** | **0.0 mm** | **0.0 mm** | **0.18 mm** | **100 %** | **100 %** | 46.2 s |
+| 自适应 + 学习残差 | **0** | **0.0 mm** | **0.0 mm** | 0.19 mm | **100 %** | **100 %** | 47.3 s |
+
+**五条不同 seed、不同间隙分布的焊缝上的平均**（step×2 / ramp / random / sine，150 mm）：
+
+| 控制器 | 平均孔洞数 | 平均烧穿长度 | 平均熔深 std | 平均在带内 | 平均循环时间 |
+|---|---|---|---|---|---|
+| 定参数 | 4.0 | 7.9 mm | 0.45 mm | 79.0 % | 33.3 s |
+| **自适应** | **0.0** | **0.1 mm** | **0.19 mm** | **99.2 %** | **33.3 s** |
+| RGB 视觉 | 0.0 | 0.3 mm | 0.38 mm | 99.1 % | 54.8 s |
+
+**自适应把烧穿长度降到 1/79、熔深标准差减半、在带内比例从 79 % 提到 99 %，而循环时间一模一样。**
+
+关于 RGB 那一路，结论要说准确：它**不是**把焊缝焊废了，而是**慢了 65 %**。
+机理清楚——它的熔深估计偏差 1.2 mm、自报 σ 也是 1.2 mm，于是提速条件几乎永远不成立，
+只能一路爬行，换来的仍是更差的熔深控制与 24 倍的未熔合长度。
+对照实验是干净的：**同一套控制律、同一个 EKF、同样的协方差处理，唯一区别是哪些测量进了滤波器。**
+
+### 4.3 结论在真实机械臂上是否成立
 
 | | 行走速度伺服 | **UR10e 在环** |
 |---|---|---|
@@ -512,64 +210,275 @@ simulate(cfg, controller=..., robot=robot)  # 其余一行都不用改
 | 循环时间 | 47.3 s | 48.1 s（+1.7 %） |
 | TCP 跟踪误差 | — | **0.006–0.056 mm** |
 
-**结论原样成立。** 这不是"运气好"，而是因为 2 Hz、±2 mm 的摆动对一台工业臂来说本来就不难；
-把它算出来，比在提案里写一句"机器人应该跟得上"有用得多。
-
-### 10.3 一路上真发现的两个问题
-
-1. **Menagerie 的伺服增益与摆动共振。** 随模型发布的 `kp=5000, kd=500` 的慢极点在
-   `kp/kd = 10 rad/s ≈ 1.6 Hz`，正好压在 2 Hz 摆动上，实测摆幅被放大到指令的 **1.9 倍**。
-   这是通用抓取整定的性质，不是硬件的性质；按焊接工况重新整定为 `kp=14000, kd=220`
-   后，TCP 平均误差 **0.134 mm**、速度跟踪精确。这两个数是本仓库里唯一与已发布模型不同的地方，
-   代码里写明了。
-2. **逆解闭在测量上会留下静差。** 把 `q_cmd = qpos + gain·dq` 这样闭环，平衡点只要求
-   `gain·dq` 等于伺服下垂量，于是稳态 TCP 误差恒为 **11 mm**。改成在**指令**上积分
-   （resolved-rate + 前馈）后降到 0.13 mm。另外给机械臂开了重力补偿——真实控制器都这么做，
-   否则那 1 厘米下垂会被误读成一个控制结果。
-
-### 10.4 渲染
-
-两条渲染管线，同一份数据：
-
-* `scripts/render_mujoco.py` → **MuJoCo 渲染器**：真实网格、阴影、随焊枪推进逐段点亮并冷却的焊道、
-  作为**真实光源**的电弧（它照亮工件并投出影子）。快，几分钟出片。
-* `scripts/render_photoreal.py` → **Blender Cycles**：UR10e 原始网格、金属材质、
-  作为体积介质的**焊接烟尘**（电弧的光会在里面散射）、随温度由白热冷却成暗色焊道的着色器。
-  两个机位：单元全景与焊枪特写。
-
-分工是严格的：**weldloop 负责物理，MuJoCo 负责运动学与臂动力学，Blender 只负责像素。**
-画面上烧进去的每一个数字都来自仿真日志；渲染不参与任何计算。
-
-> 渲染过程中修掉的几个 bug 值得记一笔，它们都是"看上去对、其实错"的那类：
-> Blender 的 `primitive_cube_add(size=1.0)` 跨度是 ±0.5，所以 `scale` 给的是**全长**——
-> 我按半长给，焊道只画了半条焊缝，着色器的位置映射也差了一倍；
-> AgX 色调映射会把过亮的自发光**去饱和成白色**，焊道发光强度调到 220 才在正确的曝光下呈现橙色；
-> 焊枪一开始是按"从 TCP 往回量"摆的，而 MJCF 是从法兰量的，于是它飘在半空。
-> 这些都是渲一帧看一眼才发现的，不是靠读代码。
+**原样成立。** 2 Hz、±2 mm 的摆动对一台工业臂本来就不难；把它算出来，
+比在提案里写一句"机器人应该跟得上"有用得多。
 
 ---
 
-## 十一、参数来源声明
+## 五、快速开始
+
+```bash
+git clone <this repo> && cd weldloop
+pip install -e .                 # numpy / scipy / matplotlib / pydantic
+python -m pytest -q              # 216 tests
+
+# 主演示：一条命令，约 28 s
+python scripts/run_demo.py --seed 0 --gap-profile step
+#   out/summary.png     给幻灯片用的单图
+#   out/dashboard.png   工程视图，两个控制器并排
+#   out/metrics.json    README 里每一个数字
+
+# 各阶段自检图
+python scripts/plot_physics.py       # 物理与仿真单元
+python scripts/plot_sensors.py       # 传感器套件与主时钟
+python scripts/plot_estimation.py    # 估计器与 RMSE 表
+python scripts/plot_control.py       # 三方控制对比
+
+# 数据集（镜像一期真实采集 schema）
+python scripts/make_dataset.py --n 6
+python scripts/train_residual.py     # 可选；无 torch 时自动跳过
+
+# 动画
+python scripts/render_animation.py   # 俯视对比
+python scripts/render_robot.py       # 第三人称（matplotlib 机械臂）
+
+# 真实机器人在环 + 照片级渲染
+pip install -e ".[robot]"            # mujoco + robot_descriptions
+python scripts/render_mujoco.py                   # MuJoCo 单元视频，约 7 min
+python scripts/render_photoreal.py --stage all    # Blender Cycles，约 60 min
+```
+
+---
+
+## 六、仓库结构
+
+```
+weldloop/
+  config.py              全部 pydantic 配置，每个数值都标了来源与是否可配置
+  interfaces.py          SensorBase / PowerSourceBase / RobotBase —— 真实硬件的接缝
+  metrics.py             焊缝评分：烧穿孔洞、未熔合长度、熔深 std、节拍
+  physics/
+    heat_source.py       Rosenthal(1946) 移动点热源、Goldak(1984) 双椭球（按名引用，不引用其参数）
+    melt_pool.py         四状态降阶熔池 ODE + 烧穿/未熔合判据
+    arc.py               电弧特性、熔化(burn-off)律、熔滴过渡、熔池振荡、短路统计
+  sim/
+    seam.py              间隙分布 g(s) 生成器
+    cell.py              5 kHz 被控对象；电源自调节是真的
+    sensors.py           六个传感器，六种速率，六种失效模式
+    logger.py            统一主时钟宽表 —— 即一期真实采集建议 schema
+    runner.py            三个时间尺度的调度
+    mujoco_cell.py       MuJoCo 单元：UR10e + 焊枪 + 夹具（可选）
+  estimation/
+    features.py          5 kHz V/I 特征：短路消隐 → 纹波频率/幅值/短路率/弧长
+    ekf.py               四状态 EKF，序贯标量更新，间隙不确定度显式传播
+    residual.py          可选小残差网络（无 torch 时优雅退化）
+    evaluate.py          离线但严格因果的传感器组合消融
+  control/
+    inner_loop.py        ms 级电源内环
+    motion_layer.py      10–100 ms 自适应运动层（本演示的重点）
+    baseline.py          定参数对照
+    vision.py            RGB 视觉对照（专门用来被测量出失败）
+  planning/task_planner.py   秒级任务规划桩，LLM 钩子在此
+  viz/                   统一配色、仪表板、动画、Blender 导出
+scripts/                 run_demo / make_dataset / train_residual / 各类绘图与渲染
+tests/                   216 个测试
+```
+
+---
+
+## 七、建模的已知局限与改进方向
+
+下面每一条都是**已知的**，不是留给读者去发现的。按"对结论的影响"从大到小排。
+
+| # | 局限 | 现在怎么处理 | 改进方向 |
+|---|---|---|---|
+| 1 | 熔池模型是**四状态降阶模型**，不是 CFD/有限元。Marangoni 对流、电弧压力、熔滴冲击、表面变形都被集总进少数系数 | docstring 明确声明；系数全部可配置 | 用 CFD 或热-流有限元做**离线**高保真解，作为 ROM 的训练/校核数据；ROM 结构保持不变，只重新辨识系数 |
+| 2 | `eta_melt` 把净功率**按常数比例**劈成"熔化"与"过热" | 单一集总标定常数，稳态复现教科书熔化效率关系 | 让 `eta_melt` 随电流/过渡模式变化；或改为两状态焓模型 |
+| 3 | 时间常数 `tau_A` / `tau_T` 被**人为上限截断**（近弧区响应快于整池） | 只改瞬态、不改稳态，代码里写明 | 增加一个"近弧小池 + 拖尾大池"的双池结构 |
+| 4 | 熔池振荡模型（`f_osc`、`a_osc`）是**瑞利型标度 + 集总常数** | 由数据辨识增益，本仓库实测增益 0.999 / 0.940 | 用高速摄影或激光测振实测熔池表面振荡，标定 `C_osc`、`k_a_osc`；区分部分熔透与全熔透的模态切换 |
+| 5 | 烧穿采用**表面张力桥接判据**（毛细长度），未解自由表面 | 两条判据（熔透板厚 / 根部跨度超限），阈值可配 | 用实测烧穿边界回归；或引入简化的自由表面静力平衡 |
+| 6 | 摆动只通过**宽深比**建模，不解摆动周期内的过程 | 明确声明；ROM 无法分辨周期内行为 | 若摆频接近熔池时间常数，需要周期内模型 |
+| 7 | **没有热积累与变形**：多道、层间温度、角变形都未建模 | 单道演示 | 加入层间温度状态与简化变形模型；这是走向多道厚板的必要项 |
+| 8 | 残差网络加进来后滤波器**偏保守**（误差 0.13 mm 而 σ 仍 0.32 mm） | 如实报告 | 在带残差的条件下重新整定 Q |
+| 9 | 电源模型是**理想 CV + 熔化律**，没有脉冲/CMT 等波形控制 | 标称工况为传统 CV | 加入脉冲/短路过渡波形；这会让 `f_sc` 通道从"几乎无信息"变成主力 |
+| 10 | 传感器噪声是**高斯 + 简单丢帧模型** | 速率、噪声、丢帧率均可配 | 用真实采集数据重估噪声谱与丢帧统计 |
+
+---
+
+## 八、走向真实产线：一期数据采集规范
+
+这是本仓库对合作最有价值的一节。**代码已经写好了，缺的是数据。**
+下面把"要采什么、怎么采、采来标定哪一项"讲清楚。
+
+### 8.1 先说清楚：模型里哪些是"待辨识"的
+
+`weldloop/config.py` 里的每个数值只有两类：低碳钢教科书物性（密度、比热、导热、熔点、熔化潜热），
+和**集总标定常数**。后者没有独立物理含义，现在的取值只保证演示落在合理焊道几何范围内。
+需要辨识的主要有：
+
+```
+熔池：eta_arc, eta_melt, C_cond, h_conv, kappa_L, tau_A, tau_T, tau_ar, tau_f
+间隙耦合：k_gap_cond, k_gap_ar
+宽深比律：AR_0, n_I, n_v, AR_min/max, 各过渡模式增益, k_weave
+电弧：V_0, E_a, rho_e, a_burn, b_burn, I_globular, I_spray
+振荡：C_osc, k_a_osc, k_osc_T, k_sag, k_sc_ratio, f_sc_max, I_sc_peak, sigma_I_sc
+缺陷：beta_bt, c_st, k_fill_support, p_min, f_min, sidewall_margin
+传感器：各噪声 std、丢帧率、烟尘衰减系数
+估计器：R（可由残差直接算）、Q（由模型误差统计定）
+```
+
+### 8.2 采集硬件与同步
+
+| 通道 | 速率 | 器件建议 | 关键要求 |
+|---|---|---|---|
+| 电弧电压 | ≥ 20 kHz（最低 5 kHz） | 隔离差分探头，直接量在**导电嘴与工件**之间 | 带宽 ≥ 10 kHz；不要用电源面板读数 |
+| 焊接电流 | ≥ 20 kHz | 霍尔/罗氏线圈 | 与电压**同一采集卡同一时基** |
+| 送丝速度 | ≥ 1 kHz | 送丝机编码器 | 真实速度，不是设定值 |
+| 机器人 TCP | ≥ 250 Hz | 控制器回读（EGM/RSI） | 与焊接数据同步，含时间戳 |
+| 激光轮廓仪 | 30–200 Hz | 前视安装，前视距离记录在案 | 要记录**它看的是哪个焊缝站位** |
+| 红外热像 | 30–60 Hz | LWIR（8–14 μm），窄带更好 | 记录标定条件；见 8.6 |
+| 电弧声 | ≥ 20 kHz | 驻极体 + 防护 | 与电信号同一时基 |
+| 焊枪测力 | 1 kHz | 六维力传感器（可选） | 次要通道 |
+| 可见光相机 | 30 Hz | 带 ND + 窄带滤镜 | **仅用于证明它失效**，不进实时回路 |
+
+**同步是第一要务。** 建议 PTP 或硬触发线，全部通道对齐到 **一个主时钟**，
+目标抖动 < 100 μs。写成本仓库 `sim/logger.py` 产生的宽表格式
+（`data/SCHEMA.md`，由代码生成，与仿真同一套列名/单位/速率），
+真实数据到位后 `estimation/` 与 `control/` 不用改一行就能跑。
+
+### 8.3 真值（ground truth）怎么拿 —— 最难也最关键
+
+**熔深不可在线测量**，所以真值必须来自破坏性检验：
+
+1. **宏观金相截面**。焊后按固定间隔切片、打磨、腐蚀、显微测量
+   （熔深 p、熔宽 w、余高、熔合线形貌）。
+   建议间隔 **10 mm**，在间隙变化剧烈的区段加密到 **5 mm**。
+   一条 200 mm 试板 ≈ 20–40 个截面。
+2. **切片位置必须能对回时间轴**。做法：焊前在板边打**基准冲点**并记录到机器人坐标系；
+   焊接日志里有 `rb_s`（TCP 沿缝位置），于是 `截面位置 → s → 时间 → 那一刻的 V/I 特征`。
+   **这一步做不好，整批数据就废了。**
+3. **辅助真值（非破坏，用于加密）**：
+   - 背面热像/背面测温 → 全熔透判定与熔透时刻；
+   - X 射线/超声 → 内部缺陷与未熔合定位（不给深度精度，但给缺陷位置）；
+   - 焊后 3D 扫描焊道 → 余高与填充率 `f`，可全长连续，成本低。
+4. **间隙真值**：焊前用轮廓仪或三坐标**冷态扫描**整条坡口，得到 `g(s)` 真值曲线。
+   这同时是轮廓仪精度的标定数据。
+
+> 破坏性截面是这套方案的瓶颈，也是它区别于"拍脑袋调参"的地方。
+> 建议把切片外包给有资质的金相实验室，按批处理。
+
+### 8.4 试验矩阵
+
+分六组，共约 **60–90 块试板**，可在 2–3 周内完成。
+
+**A. 静态工艺窗口（bead-on-plate / 零间隙对接）— 24 块**
+在 `I × v` 网格上各焊一条恒参数焊缝：
+`I ∈ {170, 200, 230, 260} A` × `v ∈ {3, 4.5, 6, 9} mm/s`，再补几个极端点。
+每条焊缝取 3–5 个截面。
+→ 辨识 `eta_arc·eta_melt`、`C_cond`、`AR_0, n_I, n_v`、`V_0, E_a, rho_e, a_burn, b_burn`。
+
+**B. 间隙阶梯 — 15 块**
+机加工出**已知**的恒定根部间隙 `g ∈ {0, 1, 2, 3, 4, 5} mm`，用标称参数焊。
+每条取 4–6 个截面。
+→ 辨识 `k_gap_cond`、`k_gap_ar`，并给出烧穿边界的第一批点。
+
+**C. 摆动矩阵 — 12 块**
+在 `g ∈ {0, 2, 4} mm` × 摆幅 `a ∈ {0, 1, 2, 3} mm`（摆频固定 2 Hz）下焊。
+→ 辨识 `k_weave`；同时验证机器人能否跟上摆动（对比指令与 TCP 回读）。
+
+**D. 动态阶跃响应 — 12 块**
+在焊缝中段做**指令阶跃**：电流 ±30 A、速度 ±2 mm/s、摆幅 0→2 mm，各若干块。
+焊后沿缝**加密切片**（阶跃前后 ±30 mm，间隔 5 mm）。
+→ 辨识时间常数 `tau_A, tau_T, tau_ar, tau_f`，这是目前最缺、也最影响控制器整定的一组。
+
+**E. 烧穿边界 — 9 块（消耗品）**
+故意推到失效：在 `g ∈ {3, 4, 5} mm` 下逐步升流/降速直到烧穿，记录烧穿发生的时刻与位置。
+→ 辨识 `beta_bt, c_st, k_fill_support`；这组数据没有替代品。
+
+**F. 传感器表征 — 与 A–E 同批采集，不额外占板**
+- IR：同步布置热电偶/双色高温计做**同点比对**，在不同烟尘工况下记录衰减；
+- 轮廓仪：与冷态三坐标扫描对比，统计精度与飞溅丢帧率；
+- RGB：全程录制并逐帧标注可用/不可用，得到真实的"可用度"曲线；
+- 麦克风：与电信号同步，验证短路–声学对应关系。
+
+### 8.5 哪一组试验标定哪一项
+
+| 试验组 | 直接辨识 | 交叉校核 |
+|---|---|---|
+| A 静态窗口 | `eta_arc·eta_melt`, `C_cond`, `AR_0/n_I/n_v`, 电弧特性, burn-off 律 | 熔化效率是否落在合理区间 |
+| B 间隙阶梯 | `k_gap_cond`, `k_gap_ar` | 与 A 的宽深比律是否自洽 |
+| C 摆动 | `k_weave` | 机器人摆动跟踪能力 |
+| D 阶跃 | `tau_A`, `tau_T`, `tau_ar`, `tau_f` | 控制器带宽是否可实现 |
+| E 烧穿边界 | `beta_bt`, `c_st`, `k_fill_support` | 与 B 的深度趋势是否一致 |
+| F 传感器 | 各噪声 std、丢帧率、`ir_smoke_tau`、`rgb_smoke_tau` | EKF 的 R 直接由残差算出 |
+| A–E 全部 | **EKF 的 Q**（由模型一步预测误差统计得到） | 2σ 覆盖率应接近 0.95 |
+| A–E 全部 | **残差网络**训练集（`estimation/residual.py`） | 必须在**未见焊缝**上验证 |
+
+### 8.6 特别提醒：熔池振荡通道要单独验证
+
+本方案的核心信号是 `f_osc` 与 `a_osc`。建议**单独安排一组验证**：
+
+* 在若干条焊缝上同步采集 **20 kHz V/I** 与 **高速摄影（≥ 2000 fps，带滤镜）**
+  或 **激光测振仪**对准熔池表面；
+* 从高速影像提取表面振荡频率与幅值，与 V/I 纹波谱比对；
+* 焊后切片给出该处的 `w` 与 `p`。
+
+这一组数据直接回答"电源信号里到底能不能读出熔池"这个问题。
+若实测的 `f_osc–w` 与 `a_osc–p` 关系与本仓库的标度律不符，**先改模型再改控制器**。
+
+### 8.7 数据量与格式
+
+单条 200 mm 焊缝：约 45 s × 5 kHz × 40 列 ≈ **9 M 数值 ≈ 12 MB**（float32 Parquet）。
+若电压电流按 20 kHz 单独存原始流，另加 ~30 MB/条。
+全部 60–90 块试板：**约 3–5 GB**，可放在一块普通硬盘上。
+
+格式就是 `data/SCHEMA.md`（由 `weldloop/sim/logger.py` 生成）：
+一个主时钟，NaN 表示"该时刻没有采样"，比主时钟快的通道做块内聚合，
+真值列以 `truth_` 前缀隔离。真实采集只需把 `truth_penetration` 等列
+换成"由金相截面插值得到的真值"。
+
+### 8.8 分阶段路线图
+
+| 阶段 | 内容 | 交付 |
+|---|---|---|
+| **A. 台架表征**（4–6 周） | 8.4 的 A–F 全部，离线辨识全部集总系数，重训残差网络 | 标定后的 `config.py` + 辨识报告 + 真实数据集 |
+| **B. 闭环试焊**（4–6 周） | 把 `control/` 接到真实电源与机器人（`TODO(real-hw)` 三个适配器），在变间隙试板上做闭环 | 定参数 vs 自适应的**实测**对比表 |
+| **C. 产线试点**（8–12 周） | 单工位试点，加入多道/层间温度、节拍统计、报警与追溯 | 良率与节拍的现场数据 |
+
+阶段 A 结束时，本仓库里除 `config.py` 的数值和 `residual.pt` 之外，**代码基本不用改**。
+这正是把接口写成抽象基类的目的。
+
+---
+
+## 九、参数来源声明
 
 仓库中所有数值只有两类：
 
 1. **低碳钢的教科书物性**（密度、比热、导热、熔点、熔化潜热），两位有效数字；
-2. **降阶模型的集总标定常数**，没有独立物理含义，取值使本演示的额定工作点落在
-   合理的焊道几何范围内。
+2. **降阶模型的集总标定常数**，没有独立物理含义，取值使本演示的额定工作点落在合理焊道几何范围内。
 
-**没有任何一个数值来自某篇文献的具体报道**，全部可配置，全部需要用一期真实采集数据重新辨识。
-README 中所有指标数字都由本仓库代码实际运行产生。
+**没有任何一个数值来自某篇文献的具体报道。** Rosenthal(1946) 与 Goldak(1984) 只按**名称**引用，
+用于模型结构，不引用其参数。README 中所有指标数字都由本仓库代码实际运行产生。
+
+唯一与已发布模型不同的地方是 MuJoCo Menagerie UR10e 的伺服增益
+（`kp=5000/kd=500` → `kp=14000/kd=220`），原因与依据写在 `sim/mujoco_cell.py` 里。
 
 ---
 
-## 十二、走向真实硬件时需要替换的适配器
+## 十、我们刻意不做的事
 
-| 抽象基类 | 仿真实现 | 真实硬件适配器（待写） |
-|---|---|---|
-| `interfaces.PowerSourceBase` | `sim.cell.SimPowerSource` | 逆变电源现场总线 / SDK |
-| `interfaces.RobotBase` | `sim.cell.SimRobot` 或 `sim.mujoco_cell.MujocoRobot`（UR10e） | 机器人 EGM / RSI 运动流。MuJoCo 版已经是"半只脚踏进真实"：把 `mj_step` 换成 EGM 流、把测量 TCP 换成机器人自身反馈即可，上层不动 |
-| `viz.robot.ArmGeometry` | 通用小型弧焊臂 | 换成实机连杆参数与关节限位，即可用同一套 `solve_path()` 做建线可达性校核 |
-| `interfaces.SensorBase` | `sim.sensors.*` | 每个物理传感器一个 |
-| `sim.seam.make_seam` | 合成间隙曲线 | 激光轮廓仪实测 / 装配扫描 |
-| `physics.melt_pool` 系数 | 集总默认值 | 用一期数据做参数辨识 |
-| `estimation.residual` | 在仿真数据上训练 | 在真实数据上重训 |
+* **不假装 LLM/VLA 在实时控制焊枪。** 理由是时间尺度与可观测性：电源内环 ~2 ms、
+  运动层 20 ms、任务规划 秒–分钟；熔深对间隙变化的响应时间常数 ~100 ms，烧穿在 1 s 内发展完毕。
+  VLA 最快只有几 Hz，而且它的输入相机实测有 74 % 的帧不可用。
+  把视觉放进实时回路，等于在视觉最不可靠的工况下宣称视觉闭环。
+  AI 出现在两个诚实的位置：`estimation/residual.py`（估计器内的小残差网络）与
+  `planning/task_planner.py`（秒级、离线的任务规划钩子，`TODO(llm-planner)` 标出了接入点）。
+* **不把 RGB 当过程传感器。** 它只作为对照组存在，用来把"为什么不用视觉"从断言变成实测结果。
+* **不编造文献基准数字。**
+
+---
+
+## 许可
+
+MIT。UR10e 模型来自 [MuJoCo Menagerie](https://github.com/google-deepmind/mujoco_menagerie)（Apache-2.0），
+按其许可使用，未做修改（伺服增益在运行时覆盖，见 §9）。

@@ -6,3 +6,7 @@ data/
 .pytest_cache/
 *.mp4
 *.gif
+data/residual.pt
+out/blender_scene/
+out/blender_wide/
+out/blender_close/
