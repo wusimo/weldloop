@@ -260,7 +260,7 @@ def run_all(
 ) -> dict[str, EstimationResult]:
     """The Phase 3 ablation: every sensor set over the same weld."""
     series = extract_series(cfg, table)
-    names = names or tuple(SENSOR_SETS)
+    names = names or ("vi", "vi+profiler", "all", "rgb")
     out = {name: run_ekf(cfg, series, name) for name in names}
     if residual is not None:
         out["all + residual"] = run_ekf(

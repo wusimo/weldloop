@@ -235,6 +235,45 @@ class TestEKFAccuracy:
         assert seeing.mean_p_std < blind.mean_p_std
 
 
+class TestRobustToLosingTheFrequencyChannel:
+    """The pessimistic case the GMAW literature warns about.
+
+    Arc-voltage pool-oscillation sensing is established for GTAW, but in GMAW
+    the reported difficulty is that the voltage can lose the *frequency*
+    signature of the pool while its fluctuation amplitude still tracks
+    penetration.  Since ``f_ripple`` is this repo's strongest single correlate
+    of penetration, the whole thesis would be fragile if the depth estimate
+    depended on it.  These tests check that it does not.
+    """
+
+    def test_penetration_survives_losing_the_frequency_channel(self, weld, series):
+        cfg, _ = weld
+        with_f = run_ekf(cfg, series, "all")
+        without_f = run_ekf(cfg, series, "all-no-f")
+        assert without_f.rmse_p < 1.15 * with_f.rmse_p
+
+    def test_the_same_holds_on_the_power_source_alone(self, weld, series):
+        cfg, _ = weld
+        with_f = run_ekf(cfg, series, "vi")
+        without_f = run_ekf(cfg, series, "vi-no-f")
+        assert without_f.rmse_p < 1.15 * with_f.rmse_p
+
+    def test_the_frequency_channel_is_what_constrains_pool_WIDTH(self, weld, series):
+        """Losing it should cost width, not depth - that is the mechanism."""
+        cfg, _ = weld
+        with_f = run_ekf(cfg, series, "vi")
+        without_f = run_ekf(cfg, series, "vi-no-f")
+        assert without_f.rmse_w > 3.0 * with_f.rmse_w
+        assert np.mean(without_f.w_std) > 3.0 * np.mean(with_f.w_std)
+
+    def test_the_filter_admits_it_lost_a_channel(self, weld, series):
+        cfg, _ = weld
+        with_f = run_ekf(cfg, series, "vi")
+        without_f = run_ekf(cfg, series, "vi-no-f")
+        assert without_f.mean_p_std > 1.8 * with_f.mean_p_std
+        assert 0.85 <= without_f.coverage_2sigma <= 1.0
+
+
 class TestEKFNumerics:
     def test_covariance_stays_symmetric_and_positive_semidefinite(self, weld, series):
         cfg, _ = weld

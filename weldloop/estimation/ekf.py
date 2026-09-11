@@ -63,15 +63,26 @@ from weldloop.physics.melt_pool import MeltPoolModel, PoolInputs, PoolState
 __all__ = ["SensorSet", "EKFOutput", "PoolEKF"]
 
 #: Named ablations for the Phase 3 table.
+#:
+#: The ``-no-f`` variants drop the ripple-FREQUENCY channel and keep only the
+#: amplitude.  They exist because the GMAW literature reports that the arc
+#: voltage can lose the pool's oscillation frequency signature (droplet growth
+#: at the wire tip perturbs the arc length, and pool-surface curvature smears
+#: the spectrum), while the fluctuation amplitude still tracks penetration.
+#: Running the estimator without the frequency channel is therefore not an
+#: academic exercise -- it is the pessimistic case for a real GMAW cell.
 SENSOR_SETS: dict[str, tuple[str, ...]] = {
     "vi": ("f_ripple", "a_ripple", "f_sc"),
+    "vi-no-f": ("a_ripple", "f_sc"),
     "vi+profiler": ("f_ripple", "a_ripple", "f_sc"),
     "all": ("f_ripple", "a_ripple", "f_sc", "ir_T_peak", "ir_pool_width"),
+    "all-no-f": ("a_ripple", "f_sc", "ir_T_peak", "ir_pool_width"),
     "rgb": ("rgb_pool_width",),
 }
 #: which ablations are allowed to use the profiler as a process-model input
 USES_PROFILER: dict[str, bool] = {
-    "vi": False, "vi+profiler": True, "all": True, "rgb": False,
+    "vi": False, "vi-no-f": False, "vi+profiler": True,
+    "all": True, "all-no-f": True, "rgb": False,
 }
 
 
