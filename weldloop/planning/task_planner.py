@@ -13,10 +13,11 @@ that decides at seconds-to-minutes cannot close that loop, and anything that
 could close it has to run at 50 Hz on the cell controller with a bounded
 worst-case latency.
 
-TODO(llm-planner): the natural hook is :meth:`TaskPlanner.plan`.  A language
-model — or any offline optimiser — can reasonably be asked to turn a job
-description, a WPS, a drawing or a fit-up scan into the segment list and the
-starting process window returned here.  What it must **not** be asked to do:
+A language model now does this job in :mod:`weldloop.planning.vla`; this file
+stays as the interface, the fallback, and the definition of what a plan *is*.
+Everything below is still the contract that module has to meet.
+
+What a planner at this layer must **not** be asked to do:
 
 * stream torch commands during the arc.  It is orders of magnitude too slow,
   and its natural input (a camera) is unusable for ~74 % of frames while the
@@ -137,8 +138,10 @@ class TaskPlanner:
             the gap classes actually measured rather than assumed; this is the
             realistic phase-1 workflow (scan the joint cold, then weld it).
 
-        TODO(llm-planner): swap this body for a model call.  Keep the return
-        type; keep the ``assumptions`` field honest.
+        This is the rule-based floor.  :class:`~weldloop.planning.vla.VLATaskPlanner`
+        returns the same type from the same documents a shop already has, and
+        falls back to this when it cannot — no key, no network, a stale
+        recording, a malformed answer.
         """
         c = self.cfg
         stickout = c.robot.ctwd_nom - c.arc.L_arc_ref
