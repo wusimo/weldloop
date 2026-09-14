@@ -69,10 +69,15 @@ def use_style() -> None:
     cjk = cjk_font()
     if cjk is not None:
         families.insert(0, cjk)
+    # CJK also has to be reachable from the monospace stack: several figures
+    # set fixed-width text for column-aligned ledgers, and without a fallback
+    # every Chinese glyph in one of those comes out as a box.
+    monospace = ["DejaVu Sans Mono"] + ([cjk] if cjk is not None else [])
     mpl.rcParams.update(
         {
             "font.family": "sans-serif",
             "font.sans-serif": families,
+            "font.monospace": monospace,
             "axes.unicode_minus": False,
             "figure.facecolor": C.bg,
             "savefig.facecolor": C.bg,

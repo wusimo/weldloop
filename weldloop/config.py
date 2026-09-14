@@ -355,6 +355,20 @@ class SeamConfig(BaseModel):
     )
     ds: float = Field(0.5e-3, description="spatial resolution of the stored profile [m]")
 
+    # --- plate thickness along the seam ------------------------------------
+    # A stepped-thickness butt joint is an ordinary fabrication feature and a
+    # good test of the planning layer: the step is on the drawing, it is not in
+    # the gap scan, and the current that is right for the thick side burns
+    # through the thin one.
+    thickness_profile: Literal["uniform", "step_down"] = "uniform"
+    thickness_step_at: float = Field(
+        0.60, ge=0.0, le=1.0,
+        description="fraction of the seam length at which the plate steps down [-]",
+    )
+    thickness_thin: float = Field(
+        4.0e-3, gt=0.0, description="plate thickness after the step [m]"
+    )
+
 
 # --------------------------------------------------------------------------
 # sensors (rates used from phase 2 onwards)

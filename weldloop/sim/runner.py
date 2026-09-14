@@ -152,7 +152,9 @@ def simulate(
     cfg = cfg or default_config()
     if seed is not None:
         cfg.sim.seed = int(seed)
-    seam = seam if seam is not None else make_seam(cfg.seam, cfg.sim.seed)
+    seam = seam if seam is not None else make_seam(
+        cfg.seam, cfg.sim.seed, thickness=cfg.joint.thickness
+    )
 
     cell = WeldCell(cfg, seam=seam, seed=cfg.sim.seed, robot=robot)
     # Sensor noise gets its own root stream, keyed off the same seed, so that

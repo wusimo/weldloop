@@ -49,7 +49,7 @@ class SeamDescription:
     """What a planner is given: the job, not the process."""
 
     length: float                     # [m]
-    thickness: float                  # [m]
+    thickness: float                  # [m], nominal; see ``notes`` if it varies
     joint_type: str = "square_butt"
     material: str = "mild_steel"
     position: str = "PA"              # flat
@@ -70,6 +70,18 @@ class Segment:
     v_wire: float
     weave_amp: float
     rationale: str
+    #: plate thickness this segment is cut from [m].  ``None`` means "as stated
+    #: for the job as a whole"; a planner that has read a drawing note about a
+    #: thickness change sets it per segment, and that is how the note reaches
+    #: the burn-through monitor 20 ms layer.
+    thickness: float | None = None
+    #: acceptance band for this segment [m].  ``None`` falls back to the
+    #: plan-level band.  A per-segment band is not a nicety: on a stepped
+    #: plate the band that is correct on the thick side is deeper than the
+    #: thin side *is*, so a single band for the job is simply wrong.
+    p_target: float | None = None
+    p_lo: float | None = None
+    p_hi: float | None = None
 
     def as_dict(self) -> dict:
         return asdict(self)

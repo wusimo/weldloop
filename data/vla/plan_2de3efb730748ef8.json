@@ -1,0 +1,94 @@
+{
+  "digest": "2de3efb730748ef8",
+  "model": "claude-opus-5",
+  "recorded_at": "2026-09-14T22:00:23+08:00",
+  "note": "Produced by claude-opus-5 inside a Claude Code session on 2026-09-14, from this repository's SYSTEM_PROMPT, PLAN_SCHEMA and docs/vla_fitup_scan.png. It did NOT go through the Messages API: the machine that produced it had no ANTHROPIC_API_KEY and no `anthropic` package. The plan was written once, from the documents, and was not revised after seeing any simulation result -- re-tuning it against the plant would make it a fit, not a plan. Re-record against the live API with `python scripts/vla_plan.py --live`.",
+  "plan": {
+    "reading": "扫描图上根部间隙的走向很清楚: 0–45 mm 基本贴合, 只有 0.1 mm 上下的装配噪声; 45 mm 开始张开, 到 85 mm 已经接近 3 mm; 85–130 mm 是一个 3.8–4.2 mm 的宽间隙平台, 峰值在 110 mm 附近; 130 mm 之后收窄, 到 145 mm 稳定在 2.0–2.2 mm 一直到焊缝末端。板厚不在扫描里: 按 A-A 剖视和工艺卡, 0–120 mm 是 6 mm, 120–200 mm 是 4 mm。注意这两件事的位置并不重合——宽间隙平台跨过了板厚台阶, 120–145 mm 这一段是薄板 + 宽间隙同时出现, 是整条焊缝最危险的地方, 也和车间备注说的上一批烧穿位置一致。错边从 +0.5 mm 单调走到 −1.0 mm, 在 65 mm 附近过零, 幅度在单道焊可以接受的范围内, 但后半段接近 1 mm, 需要靠摆动保证两侧都熔合。",
+    "segments": [
+      {
+        "s_start_mm": 0.0,
+        "s_end_mm": 45.0,
+        "gap_class": "tight",
+        "gap_mm": 0.1,
+        "thickness_mm": 6.0,
+        "I_set_A": 240.0,
+        "v_travel_mm_s": 5.2,
+        "weave_amp_mm": 0.0,
+        "p_target_mm": 4.0,
+        "p_lo_mm": 3.0,
+        "p_hi_mm": 5.0,
+        "rationale": "零间隙贴合段, 厚板, 没有填充负担, 用工艺窗口偏上的电流配较快的速度拿产能。"
+      },
+      {
+        "s_start_mm": 45.0,
+        "s_end_mm": 85.0,
+        "gap_class": "nominal",
+        "gap_mm": 1.8,
+        "thickness_mm": 6.0,
+        "I_set_A": 225.0,
+        "v_travel_mm_s": 4.4,
+        "weave_amp_mm": 1.0,
+        "p_target_mm": 4.0,
+        "p_lo_mm": 3.0,
+        "p_hi_mm": 5.0,
+        "rationale": "间隙从 0 张到 3 mm 的过渡段, 取中间值作出发点, 降一点速度保证填充, 起摆动搭桥。"
+      },
+      {
+        "s_start_mm": 85.0,
+        "s_end_mm": 120.0,
+        "gap_class": "wide",
+        "gap_mm": 3.8,
+        "thickness_mm": 6.0,
+        "I_set_A": 205.0,
+        "v_travel_mm_s": 3.4,
+        "weave_amp_mm": 2.2,
+        "p_target_mm": 3.8,
+        "p_lo_mm": 3.0,
+        "p_hi_mm": 5.0,
+        "rationale": "宽间隙平台, 厚板仍有余量。降电流避免熔穿, 降速度把填充金属给够, 摆动加大保证两侧熔合。"
+      },
+      {
+        "s_start_mm": 120.0,
+        "s_end_mm": 145.0,
+        "gap_class": "wide",
+        "gap_mm": 3.4,
+        "thickness_mm": 4.0,
+        "I_set_A": 180.0,
+        "v_travel_mm_s": 3.4,
+        "weave_amp_mm": 2.4,
+        "p_target_mm": 2.5,
+        "p_lo_mm": 2.0,
+        "p_hi_mm": 3.3,
+        "rationale": "薄板 + 宽间隙, 全缝最危险的一段。板厚只有 4 mm, 验收带按比例只有 2.0–3.3 mm, 电流压到窗口下沿, 靠摆动而不是靠电流铺开热量; 车间说上一批就是在这里烧穿的。"
+      },
+      {
+        "s_start_mm": 145.0,
+        "s_end_mm": 200.0,
+        "gap_class": "nominal",
+        "gap_mm": 2.1,
+        "thickness_mm": 4.0,
+        "I_set_A": 185.0,
+        "v_travel_mm_s": 4.0,
+        "weave_amp_mm": 1.3,
+        "p_target_mm": 2.5,
+        "p_lo_mm": 2.0,
+        "p_hi_mm": 3.3,
+        "rationale": "薄板段间隙回到 2 mm 左右且稳定, 可以比上一段稍快, 但电流仍按 4 mm 板厚给, 不能用前 120 mm 的参数。"
+      }
+    ],
+    "assumptions": [
+      "板厚台阶按图纸取在 120 mm; 扫描测不到板厚, 如果实际台阶位置有偏差, 120–145 mm 这一段的电流就给错了, 这是整份工艺卡里最脆弱的一个假设。",
+      "间隙值是从扫描图上读的代表值, 段内仍有 ±0.5 mm 的变化, 由下层的自适应层处理。",
+      "验收带按工艺卡的比例规则算: 6 mm 段 3.0–5.0 mm, 4 mm 段 2.0–3.3 mm。没有照抄厚板段的毫米数。",
+      "没有考虑焊接变形和层间温度: 单道焊, 200 mm 长, 假定热积累可以忽略。",
+      "所有数值都是出发点。50 Hz 运动层会根据熔池状态继续调, 特别是在段边界附近。"
+    ],
+    "risks": [
+      "120–145 mm: 薄板宽间隙, 烧穿风险最高。下层的烧穿预测应该在这一段最活跃, 如果这里没有触发过保护, 反而要怀疑板厚信息没传下去。",
+      "85–120 mm 到 120–145 mm 的边界上参数跳变较大(205→180 A), 段边界处会有一个短暂的过渡, 运动层的电流变化率限制会让它平滑, 但边界正好压在板厚台阶上, 不能再往后挪。",
+      "后半段错边接近 1 mm, 加上 2 mm 间隙, 侧壁未熔合的风险比烧穿更实际, 摆动半幅不要再往下压。",
+      "0–45 mm 零间隙段如果实际有点错边, 快速度会放大未熔合风险; 这一段产能最高, 也最容易被忽略。"
+    ]
+  }
+}

@@ -33,17 +33,19 @@ company can be asked to certify.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
 from weldloop._fastmath import clip
 from weldloop.config import WeldConfig, estimator_config
 from weldloop.control.inner_loop import InnerLoop
+from weldloop.control.setpoints import Nominal
 from weldloop.estimation.ekf import EKFOutput, PoolEKF, SensorSet
 from weldloop.estimation.features import FeatureStream, GapTracker
 from weldloop.physics.arc import arc_length_from_voltage, melting_rate
 from weldloop.physics.melt_pool import MeltPoolModel, PoolInputs
+from weldloop.planning.schedule import PlanSchedule
 from weldloop.sim.cell import TorchCommand
 
 __all__ = ["MotionDecision", "MotionLayer", "AdaptiveController"]
@@ -66,6 +68,7 @@ class MotionDecision:
     gap_ff: float
     slack: float
     v_wire_needed: float
+    segment: int = -1
 
 
 class MotionLayer:
@@ -78,6 +81,7 @@ class MotionLayer:
 
     def reset(self) -> None:
         c = self.cfg
+        self._nom_default = Nominal.from_config(c)
         self._integ = 0.0
         self.v_cmd = c.baseline.v_travel
         self.weave_cmd = 0.0
@@ -105,6 +109,7 @@ class MotionLayer:
         gap_ff: float,
         v_wire_now: float,
         thickness: float,
+        nom: Nominal | None = None,
     ) -> MotionDecision:
         """One motion-layer decision.
 
@@ -123,9 +128,18 @@ class MotionLayer:
         ``weave``
             Bridges the gap, reaches both sidewalls, and relieves
             over-penetration.
+
+        ``nom`` is the operating point to regulate around — nominal current,
+        travel speed, weave floor, and the acceptance band.  It defaults to the
+        procedure's single global setting; a plan supplies a different one per
+        segment.  Whatever it is, it has already been through
+        :meth:`Nominal.clamped`, so this function never sees a setpoint the
+        machine cannot produce.
         """
         c = self.cfg
         ctl, rb = c.control, c.robot
+        if nom is None:
+            nom = self._nom_default
 
         p_hat, sig_p = est.penetration, est.penetration_std
         w_hat, sig_w = est.pool_width, est.pool_width_std
@@ -133,15 +147,15 @@ class MotionLayer:
         p_ucb, p_lcb = p_hat + margin_p, p_hat - margin_p
 
         # --- band accounting -----------------------------------------------
-        e_hi = max(p_ucb - ctl.p_hi, 0.0)          # confidence interval too deep
-        e_lo = max(ctl.p_lo - p_lcb, 0.0)          # confidence interval too shallow
-        slack = min(ctl.p_hi - p_ucb, p_lcb - ctl.p_lo)   # may be negative
-        e_track = (ctl.p_target - p_hat) / ctl.p_target
-        e_band = ctl.w_safety * (e_lo - e_hi) / ctl.p_target
+        e_hi = max(p_ucb - nom.p_hi, 0.0)          # confidence interval too deep
+        e_lo = max(nom.p_lo - p_lcb, 0.0)          # confidence interval too shallow
+        slack = min(nom.p_hi - p_ucb, p_lcb - nom.p_lo)   # may be negative
+        e_track = (nom.p_target - p_hat) / nom.p_target
+        e_band = ctl.w_safety * (e_lo - e_hi) / nom.p_target
         e_norm = e_track + e_band
 
         # --- current: primary penetration authority -------------------------
-        I_nom = c.baseline.I_set
+        I_nom = nom.I_set
         I_unsat = I_nom * (1.0 + ctl.kp_I * e_norm + ctl.ki_I * self._integ)
         I_cmd = clip(I_unsat, ctl.I_min_cmd, ctl.I_max_cmd)
         # rate-limit the command: the estimate is noisy tick to tick and an
@@ -158,18 +172,18 @@ class MotionLayer:
             self._integ *= math.exp(-dt / ctl.tau_integ)
 
         # --- weave: bridge the gap, reach both sidewalls, relieve depth ------
-        a_gap = ctl.weave_per_gap * max(gap_ff, 0.0)
+        a_gap = max(ctl.weave_per_gap * max(gap_ff, 0.0), nom.weave_amp)
         need_width = max(gap_ff, 0.0) + 2.0 * c.joint.sidewall_margin
         w_lcb = w_hat - ctl.k_sigma * sig_w
         a_width = 0.5 * max(need_width - w_lcb, 0.0)
-        a_pen = ctl.k_weave_pen * (e_hi / ctl.p_target) * rb.weave_amp_max
+        a_pen = ctl.k_weave_pen * (e_hi / nom.p_target) * rb.weave_amp_max
         weave_cmd = clip(max(a_gap, a_width) + a_pen, 0.0, rb.weave_amp_max)
 
         # --- speed: productivity, gated by band slack and current headroom ---
-        slack_norm = slack / ctl.p_target
+        slack_norm = slack / nom.p_target
         headroom = (ctl.I_max_cmd - I_cmd) / (ctl.I_max_cmd - ctl.I_min_cmd)
         push = ctl.k_prod * min(slack_norm, headroom - ctl.I_headroom)
-        v_want = c.baseline.v_travel * (1.0 + push - ctl.kp_v * (e_lo - e_hi) / ctl.p_target)
+        v_want = nom.v_travel * (1.0 + push - ctl.kp_v * (e_lo - e_hi) / nom.p_target)
 
         # ...and hard-limited by what the filler can actually fill
         A_req = max(gap_ff, 0.0) * thickness + c.joint.A_reinf
@@ -243,6 +257,14 @@ class AdaptiveController:
 
     ``sensor_set`` selects which measurements the estimator may use, which is
     how the RGB-only control arm is built: same law, worse state.
+
+    ``plan`` is optional feed-forward from the seconds-to-minutes layer: a
+    :class:`~weldloop.planning.task_planner.WeldPlan` whose segments become the
+    nominal operating point the law regulates around, looked up by encoder
+    position.  Without it the whole seam is regulated around the one operating
+    point in the config, which is what a procedure sheet gives you.  The plan
+    changes the *starting point per segment*; it does not get a vote once the
+    arc is lit.
     """
 
     def __init__(
@@ -251,12 +273,14 @@ class AdaptiveController:
         *,
         sensor_set: str = "all",
         residual=None,
+        plan=None,
         name: str = "adaptive",
     ) -> None:
         self.cfg = cfg
         self.name = name
         self.sensor_set = SensorSet.named(sensor_set)
         self.residual = residual
+        self.plan = plan
         self.reset(cfg)
 
     # -- lifecycle -------------------------------------------------------
@@ -268,6 +292,9 @@ class AdaptiveController:
         self.ekf = PoolEKF(cfg, self.sensor_set, residual=self.residual)
         self.motion = MotionLayer(cfg)
         self.inner = InnerLoop(cfg)
+        self.schedule = (
+            PlanSchedule.from_plan(self.plan, cfg) if self.plan is not None else None
+        )
         self._V_ema = math.nan
         self._I_ema = math.nan
         self._last_prof_s = -1.0
@@ -303,7 +330,10 @@ class AdaptiveController:
         """Refresh only the electrical setpoints; motion commands are held."""
         c = self.cfg
         d = self.motion.last
-        I_cmd = d.I_cmd if d is not None else c.baseline.I_set
+        I_cmd = d.I_cmd if d is not None else (
+            self.schedule.nominal_at(0.0).I_set if self.schedule is not None
+            else c.baseline.I_set
+        )
         L_cmd = d.L_arc_cmd if d is not None else c.arc.L_arc_ref
         L_meas = math.nan
         if self._V_ema == self._V_ema:
@@ -339,6 +369,17 @@ class AdaptiveController:
         v_now = obs.get("rb_v_travel", c.baseline.v_travel)
         v_wire_now = obs.get("ps_v_wire", c.baseline.v_wire)
 
+        # the plan's segment has to be resolved *before* the estimator input is
+        # built: the process model needs the same plate thickness the safety
+        # monitor is using, or the filter and the monitor are describing
+        # different joints.
+        seg = -1
+        nom = None
+        if self.schedule is not None:
+            seg = self.schedule.index_at(s_now)
+            nom = self.schedule.nominals[seg]
+        thickness = nom.thickness if nom is not None else c.joint.thickness
+
         gap_now = self.gaps.gap_at(s_now)
         # act on the gap that will be under the arc a short time from now
         gap_ff = self.gaps.gap_at(s_now + v_now * c.control.gap_lead_time)
@@ -352,7 +393,7 @@ class AdaptiveController:
                 v_now,
                 v_wire_now,
                 gap_now,
-                c.joint.thickness,
+                thickness,
                 self._cmd.weave_amp,
             ]
         )
@@ -374,8 +415,10 @@ class AdaptiveController:
 
         decision = self.motion.update(
             dt, self.est, gap_ff=gap_ff, v_wire_now=v_wire_now,
-            thickness=c.joint.thickness,
+            thickness=thickness, nom=nom,
         )
+        decision = replace(decision, segment=seg)
+        self.motion.last = decision
         self._cmd = TorchCommand(
             I_set=self._cmd.I_set,
             v_wire_set=self._cmd.v_wire_set,
@@ -393,6 +436,7 @@ class AdaptiveController:
                 "gap_ff": decision.gap_ff, "v_travel": decision.v_travel,
                 "weave": decision.weave_amp, "I_cmd": decision.I_cmd,
                 "emergency": float(decision.emergency), "slack": decision.slack,
+                "segment": float(seg),
                 "w_hat": self.est.pool_width, "fill_hat": self.est.fill,
             }
         )

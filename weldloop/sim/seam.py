@@ -44,9 +44,14 @@ class Seam:
 
     Attributes
     ----------
-    s:      arc-length stations along the seam [m], uniform, step ``ds``
-    gap:    root gap at each station [m]
-    offset: lateral misalignment at each station [m]
+    s:         arc-length stations along the seam [m], uniform, step ``ds``
+    gap:       root gap at each station [m]
+    offset:    lateral misalignment at each station [m]
+    thickness: plate thickness at each station [m].  Constant for every
+               profile except ``step_down``, which is the stepped-plate joint
+               used by the planning demo: a thickness change is written on the
+               drawing, is invisible to a gap scanner, and changes what a safe
+               current is.
     """
 
     s: np.ndarray
@@ -54,6 +59,7 @@ class Seam:
     offset: np.ndarray
     kind: str
     seed: int
+    thickness: np.ndarray | None = None
 
     @property
     def length(self) -> float:
@@ -67,8 +73,26 @@ class Seam:
         """Lateral misalignment [m] at arc-length ``s``."""
         return np.interp(s, self.s, self.offset)
 
+    def thickness_at(self, s: float | np.ndarray) -> float | np.ndarray:
+        """Plate thickness [m] at arc-length ``s``.
 
-def make_seam(cfg: SeamConfig, seed: int = 0) -> Seam:
+        Nearest-station lookup, not linear interpolation: a machined step in
+        the plate is a step, and smoothing it would quietly hand the
+        controller a ramp that the real joint does not have.
+        """
+        if self.thickness is None:
+            raise ValueError("this seam carries no thickness profile")
+        i = np.clip(np.round((np.asarray(s) - self.s[0]) / (self.s[1] - self.s[0])),
+                    0, len(self.s) - 1).astype(int)
+        out = self.thickness[i]
+        return float(out) if np.isscalar(s) or np.ndim(s) == 0 else out
+
+    @property
+    def thickness_min(self) -> float:
+        return float(np.min(self.thickness))
+
+
+def make_seam(cfg: SeamConfig, seed: int = 0, thickness: float = 6.0e-3) -> Seam:
     """Build a seam with the configured gap profile.
 
     ``kind`` is one of:
@@ -80,6 +104,10 @@ def make_seam(cfg: SeamConfig, seed: int = 0) -> Seam:
     ``ramp``      linear open-up along the seam (tack-weld distortion)
     ``sine``      one and a half periods of gap breathing
     ``random``    smoothed random walk, clipped to the band
+
+    ``thickness`` is the nominal plate thickness; ``cfg.thickness_profile``
+    decides whether it is constant along the seam or steps down partway (see
+    :class:`~weldloop.config.SeamConfig`).
     """
     rng = np.random.default_rng(seed)
     n = max(int(round(cfg.length / cfg.ds)) + 1, 8)
@@ -115,4 +143,8 @@ def make_seam(cfg: SeamConfig, seed: int = 0) -> Seam:
     peak = float(np.max(np.abs(off)))
     off = off / (peak if peak > 0 else 1.0) * cfg.misalign_max
 
-    return Seam(s=s, gap=g, offset=off, kind=cfg.kind, seed=seed)
+    h = np.full(n, float(thickness))
+    if cfg.thickness_profile == "step_down":
+        h[x >= cfg.thickness_step_at] = cfg.thickness_thin
+
+    return Seam(s=s, gap=g, offset=off, kind=cfg.kind, seed=seed, thickness=h)

@@ -126,6 +126,8 @@ SCHEMA: tuple[ColumnSpec, ...] = (
                "true root gap under the arc"),
     ColumnSpec("truth_offset", "m", "simulator", 5000.0, "last", False,
                "true lateral misalignment"),
+    ColumnSpec("truth_thickness", "m", "simulator", 5000.0, "last", False,
+               "plate thickness under the arc"),
     ColumnSpec("truth_T_pool", "K", "simulator", 5000.0, "last", False,
                "true mean pool temperature"),
     ColumnSpec("truth_pool_w", "m", "simulator", 5000.0, "last", False,
@@ -259,7 +261,7 @@ class MasterClockLogger:
         "rb_weave_offset", "rb_ctwd",
     )
     _TRUTH_TICK_COLUMNS = (
-        "truth_gap", "truth_offset", "truth_T_pool", "truth_pool_w",
+        "truth_gap", "truth_offset", "truth_thickness", "truth_T_pool", "truth_pool_w",
         "truth_penetration", "truth_fill", "truth_stickout", "truth_arc_len",
         "truth_f_osc", "truth_a_osc", "truth_f_sc", "truth_smoke",
         "truth_burn_through", "truth_lack_of_fusion",
@@ -369,7 +371,8 @@ class MasterClockLogger:
             d = truth.defects
             pool = truth.pool
             values += [
-                truth.gap, truth.offset, pool.T_pool, pool.w, pool.p, pool.f,
+                truth.gap, truth.offset, truth.thickness,
+                pool.T_pool, pool.w, pool.p, pool.f,
                 truth.stickout, truth.arc_length, truth.arc.f_osc,
                 truth.arc.a_osc, truth.arc.f_sc, truth.smoke,
                 float(d.burn_through), float(d.lack_of_fusion),

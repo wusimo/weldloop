@@ -1,7 +1,10 @@
 __pycache__/
 *.pyc
 out/
-data/
+data/*
+# the recorded planning response is part of the demo: without it a fresh
+# clone with no API key cannot reproduce the R4 numbers.
+!data/vla/
 *.egg-info/
 .pytest_cache/
 *.mp4

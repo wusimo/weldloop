@@ -129,6 +129,7 @@ class GroundTruth:
     s: float
     gap: float  # (unobservable in real time; the profiler measures it ahead)
     offset: float
+    thickness: float  # plate thickness under the arc (from the drawing, not measured)
     pool: PoolState  # (unobservable)
     derived: PoolDerived  # (unobservable)
     defects: DefectFlags  # (unobservable)
@@ -330,7 +331,9 @@ class WeldCell:
         self.cfg = cfg or default_config()
         if seed is not None:
             self.cfg.sim.seed = int(seed)
-        self.seam = seam if seam is not None else make_seam(self.cfg.seam, self.cfg.sim.seed)
+        self.seam = seam if seam is not None else make_seam(
+            self.cfg.seam, self.cfg.sim.seed, thickness=self.cfg.joint.thickness
+        )
         self._robot_override = robot
         self.reset()
 
@@ -372,6 +375,16 @@ class WeldCell:
         self.pool = self.model.initial_state()
 
     # -- plumbing --------------------------------------------------------
+    def _thickness_at(self, s: float) -> float:
+        """Plate thickness under the arc [m].
+
+        Falls back to the config scalar for seams built before thickness
+        profiles existed, so an externally supplied ``Seam`` still works.
+        """
+        if self.seam.thickness is None:
+            return self.cfg.joint.thickness
+        return float(self.seam.thickness_at(s))
+
     def _pool_inputs(self, gap: float) -> PoolInputs:
         cmd = self.command_state
         return PoolInputs(
@@ -380,7 +393,7 @@ class WeldCell:
             v_travel=self.robot.v_travel,
             v_wire=self.power_source.v_wire,
             gap=gap,
-            thickness=self.cfg.joint.thickness,
+            thickness=self._thickness_at(self.robot.s),
             weave_amp=self.robot.weave_amp,
         )
 
@@ -447,7 +460,7 @@ class WeldCell:
             v_travel=self.robot.v_travel,
             v_wire=self.power_source.v_wire,
             gap=gap,
-            thickness=cfg.joint.thickness,
+            thickness=self._thickness_at(s_pos),
             weave_amp=self.robot.weave_amp,
         )
         self.pool, self._derived = self.model.step(self.pool, u, dt)
@@ -472,6 +485,7 @@ class WeldCell:
             s=s_pos,
             gap=gap,
             offset=offset,
+            thickness=u.thickness,
             pool=self.pool,
             derived=self._derived,
             defects=flags,

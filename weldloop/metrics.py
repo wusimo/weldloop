@@ -99,7 +99,14 @@ def score(table, cfg, name: str) -> WeldMetrics:
     lof_side = w < gap + 2.0 * cfg.joint.sidewall_margin
     lof_fill = f < cfg.defect.f_min
 
-    in_band = (p >= cfg.control.p_lo) & (p <= cfg.control.p_hi)
+    # The acceptance band is a *fraction of plate thickness*, which only shows
+    # up as a constant when the plate is.  On a stepped joint, scoring the thin
+    # section against the thick section's band would call a good weld bad and
+    # a burnt-through one fine.
+    h = table["truth_thickness"]
+    frac_lo = cfg.control.p_lo / cfg.joint.thickness
+    frac_hi = cfg.control.p_hi / cfg.joint.thickness
+    in_band = (p >= frac_lo * h) & (p <= frac_hi * h)
     clean = ~bt & ~lof
     length = float(s[-1] - s[0])
 
